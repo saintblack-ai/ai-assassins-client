@@ -75,10 +75,14 @@ function detectAnomalies(items) {
 export async function newsAgent() {
   const data = await getNews();
   const alerts = detectAnomalies(data.items || []);
+  const error = data.error || null;
+  const status = error ? "error" : data.live ? "live" : "fallback";
 
   return {
     name: "news-agent",
     data,
+    status,
+    error,
     trend: analyzeTrend(data.items || []),
     anomalies: alerts.filter((alert) => alert.level !== "normal"),
     alerts

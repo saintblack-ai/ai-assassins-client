@@ -189,6 +189,20 @@ button {
   color: var(--offline);
 }
 
+.panel-note {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+}
+
+.panel-note-error {
+  border-color: rgba(255, 93, 108, 0.35);
+  color: #ffd7dc;
+}
+
 .status-chip,
 .status-indicator {
   border: 1px solid var(--border);
@@ -333,6 +347,27 @@ button {
   padding: 18px;
 }
 
+.skeleton-card {
+  display: grid;
+  gap: 12px;
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+.skeleton-short {
+  width: 38%;
+}
+
+.skeleton-medium {
+  width: 65%;
+}
+
 .stock-head,
 .sitrep-header,
 .sitrep-meta,
@@ -434,6 +469,15 @@ button {
 .tier-card-active {
   border-color: var(--border-strong);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 .alert-feed {

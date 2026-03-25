@@ -224,17 +224,25 @@ function loadSystemState() {
 }
 
 function createIntelligenceSeed() {
+  const emptyFeed = {
+    data: { items: [], live: false, fetchedAt: null, source: "idle", error: null },
+    trend: "loading",
+    status: "loading",
+    error: null
+  };
+
   return {
-    market: { data: { items: [], live: false, fetchedAt: null, source: "idle" }, trend: "idle" },
-    sitrep: { data: { items: [], live: false, fetchedAt: null, source: "idle" }, trend: "idle" },
-    news: { data: { items: [], live: false, fetchedAt: null, source: "idle" }, trend: "idle" },
+    market: emptyFeed,
+    sitrep: emptyFeed,
+    news: emptyFeed,
     alerts: [],
     history: [],
     persistence: { enabled: false, saved: 0 },
     webhook: { enabled: false, sent: 0 },
     systemLevel: "normal",
     notificationPayload: null,
-    generatedAt: null
+    generatedAt: null,
+    isRefreshing: false
   };
 }
 
@@ -328,6 +336,26 @@ function AlertBadge({ level }) {
   return <span className={`alert-badge alert-${level}`}>{levelLabel(level)}</span>;
 }
 
+function PanelStatus({ agent, emptyLabel }) {
+  if (agent.status === "loading" && agent.data.items.length === 0) {
+    return <div className="panel-note">Loading {emptyLabel}...</div>;
+  }
+
+  if (agent.error) {
+    return <div className="panel-note panel-note-error">Live request failed: {agent.error}</div>;
+  }
+
+  if (agent.status === "fallback") {
+    return <div className="panel-note">Showing fallback data while live data is unavailable.</div>;
+  }
+
+  if (agent.data.items.length === 0) {
+    return <div className="panel-note">No data available yet.</div>;
+  }
+
+  return null;
+}
+
 function StockPanel({ agent }) {
   return (
     <div className="intel-panel">
@@ -336,19 +364,30 @@ function StockPanel({ agent }) {
         title="Market pulse"
         body={`Trend: ${agent.trend}. Source: ${agent.data.source}. Last sync ${formatTime(agent.data.fetchedAt)}.`}
       />
+      <PanelStatus agent={agent} emptyLabel="market data" />
       <div className="stock-grid">
-        {agent.data.items.map((item) => (
+        {(agent.data.items.length ? agent.data.items : [{ id: "loading-1" }, { id: "loading-2" }, { id: "loading-3" }]).map((item) => (
           <article className="stock-card" key={item.id}>
-            <div className="stock-head">
-              <strong>{item.symbol}</strong>
-              <span>{item.label}</span>
-            </div>
-            <div className="stock-body">
-              <h3>{formatCurrency(item.price)}</h3>
-              <p className={item.changePercent >= 0 ? "trend-up" : "trend-down"}>
-                {formatPercent(item.changePercent)}
-              </p>
-            </div>
+            {item.symbol ? (
+              <>
+                <div className="stock-head">
+                  <strong>{item.symbol}</strong>
+                  <span>{item.label}</span>
+                </div>
+                <div className="stock-body">
+                  <h3>{formatCurrency(item.price)}</h3>
+                  <p className={item.changePercent >= 0 ? "trend-up" : "trend-down"}>
+                    {formatPercent(item.changePercent)}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="skeleton-card">
+                <div className="skeleton-line skeleton-short" />
+                <div className="skeleton-line" />
+                <div className="skeleton-line skeleton-medium" />
+              </div>
+            )}
           </article>
         ))}
       </div>
@@ -393,17 +432,29 @@ function NewsPanel({ agent }) {
         title="Global event stream"
         body={`Trend: ${agent.trend}. Source: ${agent.data.source}. Headlines refresh every 60 seconds.`}
       />
+      <PanelStatus agent={agent} emptyLabel="headline stream" />
       <div className="news-list">
-        {agent.data.items.map((item) => (
+        {(agent.data.items.length ? agent.data.items : [{ id: "loading-news-1" }, { id: "loading-news-2" }, { id: "loading-news-3" }]).map((item) => (
           <article className="news-card" key={item.id}>
-            <div className="news-meta">
-              <span>{item.source}</span>
-              <span>{formatTime(item.publishedAt)}</span>
-            </div>
-            <h3>{item.title}</h3>
-            <a href={item.url} target="_blank" rel="noreferrer">
-              Open headline
-            </a>
+            {item.title ? (
+              <>
+                <div className="news-meta">
+                  <span>{item.source}</span>
+                  <span>{formatTime(item.publishedAt)}</span>
+                </div>
+                <h3>{item.title}</h3>
+                <a href={item.url} target="_blank" rel="noreferrer">
+                  Open headline
+                </a>
+              </>
+            ) : (
+              <div className="skeleton-card">
+                <div className="skeleton-line skeleton-short" />
+                <div className="skeleton-line" />
+                <div className="skeleton-line" />
+                <div className="skeleton-line skeleton-medium" />
+              </div>
+            )}
           </article>
         ))}
       </div>
@@ -671,6 +722,14 @@ export default function App() {
   );
 
   const fetchAllData = async () => {
+    setIntelligence((current) => ({
+      ...current,
+      isRefreshing: true,
+      market: current.generatedAt ? current.market : { ...current.market, status: "loading", error: null },
+      news: current.generatedAt ? current.news : { ...current.news, status: "loading", error: null },
+      sitrep: current.generatedAt ? current.sitrep : { ...current.sitrep, status: "loading", error: null }
+    }));
+
     const accessToken = session?.access_token || null;
     const userId = session?.user?.id || null;
 
@@ -681,7 +740,8 @@ export default function App() {
 
     setIntelligence({
       ...agentResult,
-      history: alertPayload?.alerts || []
+      history: alertPayload?.alerts || [],
+      isRefreshing: false
     });
   };
 
@@ -808,6 +868,7 @@ export default function App() {
             <AlertBadge level={intelligence.systemLevel} />
             <div className="status-chip">Tier: {tier}</div>
             <div className="status-chip">Last sync: {formatTime(intelligence.generatedAt)}</div>
+            {intelligence.isRefreshing ? <div className="status-chip">Refreshing live feeds...</div> : null}
           </div>
           <div className="status-chip">Auth: {session?.user?.email || "Guest mode"}</div>
           <div className="status-chip">Paid access: {hasPaidAccess(tier) ? "Unlocked" : "Limited"}</div>

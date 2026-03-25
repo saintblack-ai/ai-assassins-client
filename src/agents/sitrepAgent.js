@@ -73,10 +73,14 @@ function detectAnomalies(items) {
 export async function sitrepAgent() {
   const data = await getSitrep();
   const alerts = detectAnomalies(data.items || []);
+  const error = data.error || null;
+  const status = error ? "error" : data.live ? "live" : "fallback";
 
   return {
     name: "sitrep-agent",
     data,
+    status,
+    error,
     trend: analyzeTrend(data.items || []),
     anomalies: alerts.filter((alert) => alert.level !== "normal"),
     alerts
