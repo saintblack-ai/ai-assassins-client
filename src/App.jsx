@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { runIntelligenceAgents } from "./agents/alertCenter";
+import { STRIPE_PLANS, startStripeCheckout } from "./agents/stripeAgent";
 import { isSupabaseEnabled } from "./lib/supabase";
 import {
   clearUserAlerts,
-  createCheckoutSession,
   fetchSubscription,
   fetchUserAlerts,
   getCurrentSession,
@@ -76,27 +76,6 @@ const HASHTAG_SETS = [
   ["#SaintBlack", "#EsotericBrand", "#MysticMarketing", "#HiddenTruth", "#Archaios"],
   ["#SaintBlack", "#ConsciousCreator", "#SacredStrategy", "#MythicWisdom", "#FutureTemple"],
   ["#SaintBlack", "#ShadowWork", "#DivineTiming", "#AncientCodes", "#SignalNotNoise"]
-];
-
-const STRIPE_LINKS = [
-  {
-    id: "free",
-    label: "Free",
-    price: "$0",
-    description: "Limited alerts, medium and normal visibility, community access."
-  },
-  {
-    id: "pro",
-    label: "Pro",
-    price: "$49/mo",
-    description: "Full alerts, full /api/alerts access, complete history visibility."
-  },
-  {
-    id: "elite",
-    label: "Elite",
-    price: "$99/mo",
-    description: "Priority signals, high-threat escalation, first-line intelligence."
-  }
 ];
 
 function formatDateKey(date) {
@@ -462,6 +441,91 @@ function NewsPanel({ agent }) {
   );
 }
 
+function ConversionBanner({ tier, onOpen }) {
+  return (
+    <section className="conversion-banner">
+      <div>
+        <p className="eyebrow">Premium Access</p>
+        <h2>Unlock Full Intelligence</h2>
+        <p>
+          High-threat alerts are delayed for free users. Free users see limited intelligence
+          mode until Pro or Elite is activated.
+        </p>
+      </div>
+      <div className="conversion-actions">
+        <button className="primary-button" type="button" onClick={onOpen}>
+          Unlock Full Intelligence
+        </button>
+        <div className="status-chip">Current tier: {tier}</div>
+      </div>
+    </section>
+  );
+}
+
+function LeadCapturePanel({ email, status, onEmailChange, onSubmit }) {
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="Lead Capture"
+        title="Get 3 free intelligence signals daily"
+        body="Join the free list and receive a daily sample of the signal stack while premium alerts remain reserved for paid operators."
+      />
+      <form className="lead-form" onSubmit={onSubmit}>
+        <input
+          className="auth-input"
+          type="email"
+          value={email}
+          onChange={(event) => onEmailChange(event.target.value)}
+          placeholder="Enter your email"
+          required
+        />
+        <button className="primary-button" type="submit">
+          Get Free Signals
+        </button>
+      </form>
+      {status ? <p className="lead-note">{status}</p> : null}
+    </section>
+  );
+}
+
+function UpgradeModal({ open, tier, onClose, onCheckout }) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose} role="presentation">
+      <div className="upgrade-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="upgrade-modal-header">
+          <div>
+            <p className="eyebrow">Upgrade Access</p>
+            <h2>Unlock full intelligence now</h2>
+            <p className="section-copy">
+              Free users see limited intelligence mode. Pro and Elite remove action locks and unlock faster high-threat visibility.
+            </p>
+          </div>
+          <button className="ghost-button" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="tier-grid">
+          {STRIPE_PLANS.filter((plan) => plan.id !== "free").map((plan) => (
+            <article className={`tier-card ${tier === plan.id ? "tier-card-active" : ""}`} key={plan.id}>
+              <p className="eyebrow">{plan.label}</p>
+              <h3>{plan.price}/mo</h3>
+              <strong>{plan.headline}</strong>
+              <p>{plan.description}</p>
+              <button className="primary-button" type="button" onClick={() => onCheckout(plan.id)}>
+                Choose {plan.label}
+              </button>
+            </article>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AuthPanel({
   authMode,
   email,
@@ -507,16 +571,17 @@ function SubscriptionPanel({ tier, onCheckout, session }) {
       <SectionHeader
         eyebrow="Subscription Tiers"
         title="Monetized intelligence access"
-        body="Free users get limited alerts. Pro unlocks full access. Elite gets priority signals and first-line escalation."
+        body="High-threat alerts are delayed for free users. Pro unlocks full access. Elite gets priority signals and first-line escalation."
       />
       <div className="tier-grid">
-        {STRIPE_LINKS.map((plan) => (
+        {STRIPE_PLANS.map((plan) => (
           <article className={`tier-card ${tier === plan.id ? "tier-card-active" : ""}`} key={plan.id}>
             <p className="eyebrow">{plan.label}</p>
-            <h3>{plan.price}</h3>
+            <h3>{plan.price}{plan.id === "free" ? "" : "/mo"}</h3>
+            {plan.headline ? <strong>{plan.headline}</strong> : null}
             <p>{plan.description}</p>
             {plan.id === "free" ? (
-              <div className="status-chip">Current baseline access</div>
+              <div className="status-chip">Free users see limited intelligence mode</div>
             ) : (
               <button className="ghost-button" type="button" onClick={() => onCheckout(plan.id)} disabled={!session}>
                 {session ? `Upgrade to ${plan.label}` : "Sign in to upgrade"}
@@ -543,11 +608,11 @@ function UserPanel({ session, tier, subscription, onSignOut, historyCount }) {
         <article className="memory-card">
           <strong>{session?.user?.email || "Guest"}</strong>
           <span>Tier: {tier}</span>
-          <span>{hasPaidAccess(tier) ? "Paid access enabled" : "Free access limits active"}</span>
+          <span>{hasPaidAccess(tier) ? "Paid access enabled" : "Free users see limited intelligence mode"}</span>
         </article>
         <article className="memory-card">
           <strong>/api/alerts</strong>
-          <span>{hasPaidAccess(tier) ? "Full alert payloads" : "High alerts restricted"}</span>
+          <span>{hasPaidAccess(tier) ? "Full alert payloads" : "High-threat alerts are delayed for free users"}</span>
           <span>{tier === "elite" ? "Priority signals enabled" : "Priority signals locked"}</span>
         </article>
         <article className="memory-card">
@@ -566,7 +631,7 @@ function AlertFeedPanel({ alerts, lockedCount, tier, onClear, persistence, webho
       <SectionHeader
         eyebrow="Notification Panel"
         title="ARCHAIOS ALERT FEED"
-        body="Paid users can see high-level alerts. Free tier sees medium and normal visibility only."
+        body="High-threat alerts are delayed for free users. Paid users can see high-level alerts in real time."
         action="CLEAR ALERTS"
         onAction={onClear}
       />
@@ -575,7 +640,7 @@ function AlertFeedPanel({ alerts, lockedCount, tier, onClear, persistence, webho
         <div className="status-chip">Supabase: {persistence.enabled ? `saved ${persistence.saved}` : "disabled"}</div>
         <div className="status-chip">Webhook: {webhook.enabled ? `sent ${webhook.sent}` : "disabled"}</div>
         {!hasPaidAccess(tier) && lockedCount > 0 ? (
-          <div className="status-chip">{lockedCount} high alerts locked behind Pro</div>
+          <div className="status-chip">{lockedCount} delayed high-threat alerts locked behind Pro</div>
         ) : null}
       </div>
       <div className="alert-feed">
@@ -635,8 +700,12 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [leadEmail, setLeadEmail] = useState("");
+  const [leadStatus, setLeadStatus] = useState("");
+  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
+  const isFreeTier = !hasPaidAccess(tier);
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(system));
@@ -773,10 +842,11 @@ export default function App() {
 
   const handleCheckout = async (requestedTier) => {
     if (!session?.access_token) {
+      setIsUpgradeModalOpen(false);
       return;
     }
 
-    const payload = await createCheckoutSession(session.access_token, requestedTier);
+    const payload = await startStripeCheckout(session.access_token, requestedTier);
     if (payload?.url) {
       window.location.href = payload.url;
     }
@@ -794,6 +864,22 @@ export default function App() {
 
   const handleSignOut = async () => {
     await signOut();
+  };
+
+  const handleLeadSubmit = (event) => {
+    event.preventDefault();
+    window.localStorage.setItem("ai-assassins-lead-email", leadEmail);
+    setLeadStatus("You are on the list. Your 3 free intelligence signals will arrive daily.");
+    setLeadEmail("");
+  };
+
+  const handleLockedAction = (action) => {
+    if (isFreeTier) {
+      setIsUpgradeModalOpen(true);
+      return;
+    }
+
+    action();
   };
 
   const runAutomation = () => {
@@ -840,6 +926,13 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      <ConversionBanner tier={tier} onOpen={() => setIsUpgradeModalOpen(true)} />
+      <UpgradeModal
+        open={isUpgradeModalOpen}
+        tier={tier}
+        onClose={() => setIsUpgradeModalOpen(false)}
+        onCheckout={handleCheckout}
+      />
       <section className="hero-panel">
         <div className="hero-copy">
           <p className="eyebrow">{THEME} Monetized Intelligence Platform</p>
@@ -850,14 +943,26 @@ export default function App() {
             users while unlocking full and priority access for Pro and Elite.
           </p>
           <div className="hero-actions">
-            <button className="primary-button" onClick={runAutomation} type="button">
-              Generate Today&apos;s 9 Posts
+            <button
+              className={`primary-button ${isFreeTier ? "button-locked" : ""}`}
+              onClick={() => handleLockedAction(runAutomation)}
+              type="button"
+            >
+              {isFreeTier ? "Unlock To Generate Posts" : "Generate Today&apos;s 9 Posts"}
             </button>
-            <button className="ghost-button" onClick={fetchAllData} type="button">
-              Refresh Intelligence Now
+            <button
+              className={`ghost-button ${isFreeTier ? "button-locked" : ""}`}
+              onClick={() => handleLockedAction(fetchAllData)}
+              type="button"
+            >
+              {isFreeTier ? "Unlock To Refresh Intelligence" : "Refresh Intelligence Now"}
             </button>
-            <button className="ghost-button" onClick={createNextWeek} type="button">
-              Extend Content Calendar
+            <button
+              className={`ghost-button ${isFreeTier ? "button-locked" : ""}`}
+              onClick={() => handleLockedAction(createNextWeek)}
+              type="button"
+            >
+              {isFreeTier ? "Unlock To Extend Calendar" : "Extend Content Calendar"}
             </button>
           </div>
         </div>
@@ -871,7 +976,9 @@ export default function App() {
             {intelligence.isRefreshing ? <div className="status-chip">Refreshing live feeds...</div> : null}
           </div>
           <div className="status-chip">Auth: {session?.user?.email || "Guest mode"}</div>
-          <div className="status-chip">Paid access: {hasPaidAccess(tier) ? "Unlocked" : "Limited"}</div>
+          <div className="status-chip">
+            Paid access: {hasPaidAccess(tier) ? "Unlocked" : "Free users see limited intelligence mode"}
+          </div>
           <div className="signal-grid">
             <MetricCard
               label="Engagement"
@@ -917,6 +1024,13 @@ export default function App() {
         )}
         <SubscriptionPanel tier={tier} onCheckout={handleCheckout} session={session} />
       </section>
+
+      <LeadCapturePanel
+        email={leadEmail}
+        status={leadStatus}
+        onEmailChange={setLeadEmail}
+        onSubmit={handleLeadSubmit}
+      />
 
       <section className="intel-grid">
         <StockPanel agent={intelligence.market} />
@@ -964,10 +1078,10 @@ export default function App() {
             body="Use social content to funnel users into paid intelligence subscriptions and premium offer flows."
           />
           <div className="tier-grid">
-            {STRIPE_LINKS.map((plan) => (
+            {STRIPE_PLANS.map((plan) => (
               <article className="stripe-card" key={plan.id}>
                 <strong>{plan.label}</strong>
-                <span>{plan.price}</span>
+                <span>{plan.price}{plan.id === "free" ? "" : "/mo"}</span>
                 <p>{plan.description}</p>
               </article>
             ))}
