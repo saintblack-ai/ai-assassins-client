@@ -83,6 +83,14 @@ button {
   justify-items: end;
 }
 
+.activity-feed,
+.agent-grid,
+.revenue-grid,
+.brief-actions {
+  display: grid;
+  gap: 14px;
+}
+
 .hero-panel,
 .panel,
 .intel-panel {
@@ -239,6 +247,98 @@ button {
 .lead-note {
   margin: 14px 0 0;
   color: var(--accent-soft);
+}
+
+.premium-lock-card,
+.agent-card,
+.activity-card,
+.brief-card {
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 22px;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.premium-lock-card h3,
+.agent-card h3 {
+  margin: 0;
+}
+
+.premium-lock-card p,
+.activity-card p,
+.activity-card span,
+.agent-card p,
+.brief-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.agent-output,
+.agent-metric {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-output label {
+  color: var(--accent-soft);
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.agent-metric strong {
+  font-size: 1.8rem;
+}
+
+.activity-card span {
+  line-height: 1.5;
+}
+
+.activity-high {
+  border-color: rgba(255, 93, 108, 0.35);
+}
+
+.activity-medium {
+  border-color: rgba(255, 186, 82, 0.35);
+}
+
+.activity-normal {
+  border-color: rgba(42, 208, 135, 0.35);
+}
+
+.revenue-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tier-callout {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tier-callout strong,
+.brief-action {
+  display: block;
+}
+
+.tier-callout p {
+  color: var(--muted);
+}
+
+.brief-actions {
+  margin-top: 8px;
+}
+
+.brief-action {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
 }
 
 .panel-note {
@@ -499,7 +599,9 @@ button {
 }
 
 .tier-grid,
-.user-grid {
+.user-grid,
+.agent-grid,
+.activity-feed {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -714,7 +816,10 @@ button {
   .queue-list,
   .news-list,
   .tier-grid,
-  .user-grid {
+  .user-grid,
+  .agent-grid,
+  .activity-feed,
+  .revenue-grid {
     grid-template-columns: 1fr;
   }
 
@@ -763,7 +868,8 @@ button {
 
   .signal-grid,
   .stock-grid,
-  .calendar-grid {
+  .calendar-grid,
+  .revenue-grid {
     grid-template-columns: 1fr;
   }
 

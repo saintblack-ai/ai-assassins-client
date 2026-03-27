@@ -81,12 +81,12 @@ export async function getUserTier(userId) {
   return "free";
 }
 
-async function authorizedFetch(path, accessToken, options = {}) {
+async function apiFetch(path, accessToken, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...(options.headers || {})
     }
   });
@@ -100,20 +100,34 @@ async function authorizedFetch(path, accessToken, options = {}) {
 }
 
 export async function fetchUserAlerts(accessToken) {
-  return authorizedFetch("/api/alerts", accessToken, { method: "GET" });
+  return apiFetch("/api/alerts", accessToken, { method: "GET" });
 }
 
 export async function clearUserAlerts(accessToken) {
-  return authorizedFetch("/api/alerts", accessToken, { method: "DELETE" });
+  return apiFetch("/api/alerts", accessToken, { method: "DELETE" });
 }
 
 export async function createCheckoutSession(accessToken, tier) {
-  return authorizedFetch("/api/stripe/checkout", accessToken, {
+  return apiFetch("/api/stripe/checkout", accessToken, {
     method: "POST",
     body: JSON.stringify({ tier })
   });
 }
 
 export async function fetchSubscription(accessToken) {
-  return authorizedFetch("/api/subscription", accessToken, { method: "GET" });
+  return apiFetch("/api/subscription", accessToken, { method: "GET" });
+}
+
+export async function fetchPlatformDashboard(accessToken) {
+  return apiFetch("/api/platform/dashboard", accessToken, { method: "GET" });
+}
+
+export async function captureLead(email) {
+  return apiFetch("/api/leads", null, {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      source: "ai-assassins-dashboard"
+    })
+  });
 }

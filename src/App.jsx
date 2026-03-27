@@ -3,7 +3,9 @@ import { runIntelligenceAgents } from "./agents/alertCenter";
 import { STRIPE_PLANS, startStripeCheckout } from "./agents/stripeAgent";
 import { isSupabaseEnabled } from "./lib/supabase";
 import {
+  captureLead,
   clearUserAlerts,
+  fetchPlatformDashboard,
   fetchSubscription,
   fetchUserAlerts,
   getCurrentSession,
@@ -225,6 +227,32 @@ function createIntelligenceSeed() {
   };
 }
 
+function createPlatformSeed() {
+  return {
+    generatedAt: null,
+    user: {
+      id: null,
+      email: null,
+      tier: "free",
+      paid: false,
+      prioritySignals: false
+    },
+    premium: {
+      currentTier: "free",
+      limitedMode: true,
+      delayedHighThreatAlerts: true,
+      canRefreshRealtime: false,
+      canGeneratePosts: false,
+      canExtendCalendar: false,
+      prioritySignals: false
+    },
+    activityFeed: [],
+    agents: [],
+    revenue: null,
+    briefing: null
+  };
+}
+
 function formatCurrency(value) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -257,6 +285,20 @@ function levelLabel(level) {
     return "Medium threat";
   }
   return "Normal";
+}
+
+function tierRank(tier) {
+  if (tier === "elite") {
+    return 3;
+  }
+  if (tier === "pro") {
+    return 2;
+  }
+  return 1;
+}
+
+function hasTierAccess(currentTier, requiredTier) {
+  return tierRank(currentTier) >= tierRank(requiredTier);
 }
 
 function liveStatus(intelligence) {
@@ -488,6 +530,153 @@ function LeadCapturePanel({ email, status, onEmailChange, onSubmit }) {
   );
 }
 
+function PremiumLockCard({ title, body, onUnlock }) {
+  return (
+    <article className="premium-lock-card">
+      <p className="eyebrow">Premium Locked</p>
+      <h3>{title}</h3>
+      <p>{body}</p>
+      <button className="primary-button" type="button" onClick={onUnlock}>
+        Unlock Full Intelligence
+      </button>
+    </article>
+  );
+}
+
+function ActivityFeedPanel({ feed }) {
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="Live Activity Feed"
+        title="Operational activity stream"
+        body="Realtime platform actions from the internal agent layer. Simulated where external signals are unavailable."
+      />
+      <div className="activity-feed">
+        {feed.map((item) => (
+          <article className={`activity-card activity-${item.level}`} key={item.id}>
+            <div className="alert-head">
+              <strong>{item.actor}</strong>
+              <AlertBadge level={item.level === "normal" ? "normal" : item.level} />
+            </div>
+            <p>{item.action}</p>
+            <span>{item.detail}</span>
+            <div className="alert-meta">
+              <span>Live system event</span>
+              <span>{formatTime(item.timestamp)}</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AgentSuitePanel({ agents, tier, onUnlock }) {
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="AI Automation System"
+        title="Internal agent suite"
+        body="Content, marketing, traffic, intelligence, conversion, and analytics agents feed the platform with operational outputs."
+      />
+      <div className="agent-grid">
+        {agents.map((agent) =>
+          agent.locked ? (
+            <PremiumLockCard
+              key={agent.id}
+              title={`${agent.name} locked`}
+              body={`${agent.minTier.toUpperCase()} access is required to view this agent's outputs and metrics.`}
+              onUnlock={onUnlock}
+            />
+          ) : (
+            <article className="agent-card" key={agent.id}>
+              <div className="alert-head">
+                <strong>{agent.name}</strong>
+                <span className="status-chip">{agent.status}</span>
+              </div>
+              <p>{agent.summary}</p>
+              <div className="agent-output">
+                <label>Latest Output</label>
+                <p>{agent.output}</p>
+              </div>
+              <div className="agent-metric">
+                <span>{agent.metricLabel}</span>
+                <strong>{agent.metricValue}</strong>
+              </div>
+              <div className="alert-meta">
+                <span>Visible to {agent.minTier}+</span>
+                <span>{hasTierAccess(tier, agent.minTier) ? "Unlocked" : "Upgrade required"}</span>
+              </div>
+            </article>
+          )
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RevenueCommandPanel({ revenue, briefing, premium, onUnlock }) {
+  if (!revenue || !briefing) {
+    return null;
+  }
+
+  return (
+    <section className="dashboard-grid">
+      <section className="panel">
+        <SectionHeader
+          eyebrow="Revenue Command"
+          title="Monetization posture"
+          body="Subscription velocity, conversion pressure, and projected revenue are surfaced here for operator decisions."
+        />
+        <div className="revenue-grid">
+          <MetricCard
+            label="MRR"
+            value={`$${Number(revenue.monthlyRecurringRevenue || 0).toLocaleString()}`}
+            detail="Estimated recurring revenue"
+          />
+          <MetricCard
+            label="Subscribers"
+            value={Number(revenue.activeSubscribers || 0).toLocaleString()}
+            detail="Active paying users"
+          />
+          <MetricCard
+            label="Conv. Rate"
+            value={`${Number(revenue.conversionRate || 0).toFixed(1)}%`}
+            detail="Upgrade conversion"
+          />
+        </div>
+        {!premium.prioritySignals ? (
+          <div className="tier-callout">
+            <strong>Elite priority signals locked</strong>
+            <p>Elite unlocks the deepest revenue diagnostics and first-line escalation intelligence.</p>
+            <button className="ghost-button" type="button" onClick={onUnlock}>
+              Upgrade To Elite
+            </button>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel">
+        <SectionHeader
+          eyebrow="Daily Brief"
+          title={briefing.title}
+          body="This summary is generated for the current tier and reflects the platform's current revenue and intelligence posture."
+        />
+        <div className="brief-card">
+          <p>{briefing.summary}</p>
+          <div className="brief-actions">
+            {briefing.actions?.map((action) => (
+              <div className="brief-action" key={action}>
+                {action}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
 function UpgradeModal({ open, tier, onClose, onCheckout }) {
   if (!open) {
     return null;
@@ -692,6 +881,7 @@ function AlertHistoryPanel({ history, tier }) {
 export default function App() {
   const [system, setSystem] = useState(() => loadSystemState());
   const [intelligence, setIntelligence] = useState(createIntelligenceSeed);
+  const [platformDashboard, setPlatformDashboard] = useState(createPlatformSeed);
   const [session, setSession] = useState(null);
   const [tier, setTier] = useState("free");
   const [subscription, setSubscription] = useState(null);
@@ -702,6 +892,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [leadEmail, setLeadEmail] = useState("");
   const [leadStatus, setLeadStatus] = useState("");
+  const [leadBusy, setLeadBusy] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
@@ -802,9 +993,10 @@ export default function App() {
     const accessToken = session?.access_token || null;
     const userId = session?.user?.id || null;
 
-    const [agentResult, alertPayload] = await Promise.all([
+    const [agentResult, alertPayload, dashboardPayload] = await Promise.all([
       runIntelligenceAgents({ userId, tier }),
-      accessToken ? fetchUserAlerts(accessToken).catch(() => null) : Promise.resolve(null)
+      accessToken ? fetchUserAlerts(accessToken).catch(() => null) : Promise.resolve(null),
+      fetchPlatformDashboard(accessToken).catch(() => null)
     ]);
 
     setIntelligence({
@@ -812,6 +1004,10 @@ export default function App() {
       history: alertPayload?.alerts || [],
       isRefreshing: false
     });
+
+    if (dashboardPayload) {
+      setPlatformDashboard(dashboardPayload);
+    }
   };
 
   useEffect(() => {
@@ -866,11 +1062,19 @@ export default function App() {
     await signOut();
   };
 
-  const handleLeadSubmit = (event) => {
+  const handleLeadSubmit = async (event) => {
     event.preventDefault();
-    window.localStorage.setItem("ai-assassins-lead-email", leadEmail);
-    setLeadStatus("You are on the list. Your 3 free intelligence signals will arrive daily.");
-    setLeadEmail("");
+    setLeadBusy(true);
+
+    try {
+      await captureLead(leadEmail);
+      setLeadStatus("You are on the list. Your 3 free intelligence signals will arrive daily.");
+      setLeadEmail("");
+    } catch (error) {
+      setLeadStatus(String(error?.message || error));
+    } finally {
+      setLeadBusy(false);
+    }
   };
 
   const handleLockedAction = (action) => {
@@ -1027,10 +1231,26 @@ export default function App() {
 
       <LeadCapturePanel
         email={leadEmail}
-        status={leadStatus}
+        status={leadBusy ? "Saving your access request..." : leadStatus}
         onEmailChange={setLeadEmail}
         onSubmit={handleLeadSubmit}
       />
+
+      <RevenueCommandPanel
+        revenue={platformDashboard.revenue}
+        briefing={platformDashboard.briefing}
+        premium={platformDashboard.premium}
+        onUnlock={() => setIsUpgradeModalOpen(true)}
+      />
+
+      <section className="dashboard-grid">
+        <ActivityFeedPanel feed={platformDashboard.activityFeed} />
+        <AgentSuitePanel
+          agents={platformDashboard.agents}
+          tier={tier}
+          onUnlock={() => setIsUpgradeModalOpen(true)}
+        />
+      </section>
 
       <section className="intel-grid">
         <StockPanel agent={intelligence.market} />
