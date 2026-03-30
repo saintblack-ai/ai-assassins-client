@@ -1,6 +1,6 @@
 import { isSupabaseEnabled, supabase } from "./supabase";
 
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_URL || "http://localhost:5000").replace(/\/+$/, "");
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_URL || (import.meta.env.PROD ? "" : "http://localhost:5000")).replace(/\/+$/, "");
 
 export function hasPaidAccess(tier) {
   return tier === "pro" || tier === "elite";
@@ -128,6 +128,17 @@ export async function captureLead(email) {
     body: JSON.stringify({
       email,
       source: "ai-assassins-dashboard"
+    })
+  });
+}
+
+export async function logCtaClick(cta, location, tier = "free") {
+  return apiFetch("/api/cta-click", null, {
+    method: "POST",
+    body: JSON.stringify({
+      cta,
+      location,
+      tier
     })
   });
 }

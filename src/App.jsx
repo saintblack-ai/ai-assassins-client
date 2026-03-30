@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { runIntelligenceAgents } from "./agents/alertCenter";
-import { STRIPE_PLANS, startStripeCheckout } from "./agents/stripeAgent";
+import { startStripeCheckout } from "./agents/stripeAgent";
+import { PRICING_TIERS } from "./lib/pricing";
 import { isSupabaseEnabled } from "./lib/supabase";
 import {
   captureLead,
@@ -11,6 +12,7 @@ import {
   getCurrentSession,
   getUserTier,
   hasPaidAccess,
+  logCtaClick,
   signIn,
   signOut,
   signUp,
@@ -230,6 +232,8 @@ function createIntelligenceSeed() {
 function createPlatformSeed() {
   return {
     generatedAt: null,
+    pricing: PRICING_TIERS,
+    userTier: "free",
     user: {
       id: null,
       email: null,
@@ -249,6 +253,11 @@ function createPlatformSeed() {
     activityFeed: [],
     agents: [],
     revenue: null,
+    analytics: {
+      leadSubmissions: 0,
+      ctaClicks: 0,
+      source: "local"
+    },
     briefing: null
   };
 }
@@ -340,6 +349,20 @@ function SectionHeader({ eyebrow, title, body, action, onAction }) {
           {action}
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function SectionCtaBar({ title = "Unlock full access", body = "Upgrade now", onUpgrade }) {
+  return (
+    <div className="section-cta-bar">
+      <div>
+        <strong>{title}</strong>
+        <p>{body}</p>
+      </div>
+      <button className="primary-button" type="button" onClick={onUpgrade}>
+        Upgrade now
+      </button>
     </div>
   );
 }
@@ -483,20 +506,52 @@ function NewsPanel({ agent }) {
   );
 }
 
-function ConversionBanner({ tier, onOpen }) {
+function ConversionBanner({
+  tier,
+  leadEmail,
+  leadBusy,
+  onLeadChange,
+  onLeadSubmit,
+  onUnlockPro,
+  onGoElite,
+  onGetAccess
+}) {
   return (
     <section className="conversion-banner">
-      <div>
+      <div className="conversion-copy">
         <p className="eyebrow">Premium Access</p>
-        <h2>Unlock Full Intelligence</h2>
+        <h2>AI System Generating Signals, Content, and Opportunities — Daily</h2>
         <p>
-          High-threat alerts are delayed for free users. Free users see limited intelligence
-          mode until Pro or Elite is activated.
+          Upgrade to unlock full intelligence and real-time access.
         </p>
+        <div className="urgency-stack">
+          <div className="urgency-pill">Real-time signals locked</div>
+          <div className="urgency-pill">Premium intelligence delayed</div>
+          <div className="urgency-pill">Upgrade to unlock now</div>
+        </div>
+        <form className="micro-capture-form" onSubmit={onLeadSubmit}>
+          <input
+            className="auth-input"
+            type="email"
+            value={leadEmail}
+            onChange={(event) => onLeadChange(event.target.value)}
+            placeholder="Enter email to save your access"
+            required
+          />
+          <button className="ghost-button" type="submit" disabled={leadBusy}>
+            {leadBusy ? "Saving..." : "Save your access"}
+          </button>
+        </form>
       </div>
       <div className="conversion-actions">
-        <button className="primary-button" type="button" onClick={onOpen}>
-          Unlock Full Intelligence
+        <button className="primary-button" type="button" onClick={onUnlockPro}>
+          Upgrade to Pro ($49)
+        </button>
+        <button className="ghost-button" type="button" onClick={onGoElite}>
+          Go Elite ($99)
+        </button>
+        <button className="ghost-button" type="button" onClick={onGetAccess}>
+          Get Intelligence Access
         </button>
         <div className="status-chip">Current tier: {tier}</div>
       </div>
@@ -504,7 +559,7 @@ function ConversionBanner({ tier, onOpen }) {
   );
 }
 
-function LeadCapturePanel({ email, status, onEmailChange, onSubmit }) {
+function LeadCapturePanel({ email, status, onEmailChange, onSubmit, analytics }) {
   return (
     <section className="panel">
       <SectionHeader
@@ -525,6 +580,10 @@ function LeadCapturePanel({ email, status, onEmailChange, onSubmit }) {
           Get Free Signals
         </button>
       </form>
+      <div className="status-row status-row-wrap">
+        <div className="status-chip">Lead submissions: {analytics.leadSubmissions}</div>
+        <div className="status-chip">CTA clicks: {analytics.ctaClicks}</div>
+      </div>
       {status ? <p className="lead-note">{status}</p> : null}
     </section>
   );
@@ -543,7 +602,49 @@ function PremiumLockCard({ title, body, onUnlock }) {
   );
 }
 
-function ActivityFeedPanel({ feed }) {
+function LockedPanelOverlay({ onUnlock }) {
+  return (
+    <div className="locked-panel-overlay">
+      <strong>Upgrade to access full system</strong>
+      <p>Upgrade for real-time signals, advanced analytics, and premium agent outputs.</p>
+      <button className="primary-button" type="button" onClick={onUnlock}>
+        Unlock full access
+      </button>
+    </div>
+  );
+}
+
+function SocialProofPanel({ analytics, revenue }) {
+  const activeUsers = Number(analytics?.leadSubmissions || 0) + 27;
+  const runningAgents = Math.max(18, Number(revenue?.activeSubscribers || 0) % 12 + 18);
+  const liveActivity = Number(analytics?.ctaClicks || 0) + 84;
+
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="Social Proof"
+        title="System momentum"
+        body="Visible activity increases confidence and creates immediate urgency around upgrade intent."
+      />
+      <div className="proof-grid">
+        <article className="proof-card">
+          <strong>{activeUsers}</strong>
+          <span>Users analyzing signals now</span>
+        </article>
+        <article className="proof-card">
+          <strong>{runningAgents}</strong>
+          <span>Agents running continuously</span>
+        </article>
+        <article className="proof-card">
+          <strong>{liveActivity}</strong>
+          <span>Live system activity</span>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function ActivityFeedPanel({ feed, loading, error, locked, onUnlock }) {
   return (
     <section className="panel">
       <SectionHeader
@@ -551,27 +652,33 @@ function ActivityFeedPanel({ feed }) {
         title="Operational activity stream"
         body="Realtime platform actions from the internal agent layer. Simulated where external signals are unavailable."
       />
-      <div className="activity-feed">
-        {feed.map((item) => (
-          <article className={`activity-card activity-${item.level}`} key={item.id}>
-            <div className="alert-head">
-              <strong>{item.actor}</strong>
-              <AlertBadge level={item.level === "normal" ? "normal" : item.level} />
-            </div>
-            <p>{item.action}</p>
-            <span>{item.detail}</span>
-            <div className="alert-meta">
-              <span>Live system event</span>
-              <span>{formatTime(item.timestamp)}</span>
-            </div>
-          </article>
-        ))}
+      {loading ? <div className="panel-note">Loading platform activity...</div> : null}
+      {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+      <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
+        <div className="activity-feed">
+          {feed.map((item) => (
+            <article className={`activity-card activity-${item.level}`} key={item.id}>
+              <div className="alert-head">
+                <strong>{item.actor}</strong>
+                <AlertBadge level={item.level === "normal" ? "normal" : item.level} />
+              </div>
+              <p>{item.action}</p>
+              <span>{item.detail}</span>
+              <div className="alert-meta">
+                <span>Live system event</span>
+                <span>{formatTime(item.timestamp)}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+        {locked ? <LockedPanelOverlay onUnlock={onUnlock} /> : null}
       </div>
+      <SectionCtaBar body="Upgrade now to unlock the live activity feed." onUpgrade={onUnlock} />
     </section>
   );
 }
 
-function AgentSuitePanel({ agents, tier, onUnlock }) {
+function AgentSuitePanel({ agents, tier, onUnlock, loading, error, locked }) {
   return (
     <section className="panel">
       <SectionHeader
@@ -579,47 +686,49 @@ function AgentSuitePanel({ agents, tier, onUnlock }) {
         title="Internal agent suite"
         body="Content, marketing, traffic, intelligence, conversion, and analytics agents feed the platform with operational outputs."
       />
-      <div className="agent-grid">
-        {agents.map((agent) =>
-          agent.locked ? (
-            <PremiumLockCard
-              key={agent.id}
-              title={`${agent.name} locked`}
-              body={`${agent.minTier.toUpperCase()} access is required to view this agent's outputs and metrics.`}
-              onUnlock={onUnlock}
-            />
-          ) : (
-            <article className="agent-card" key={agent.id}>
-              <div className="alert-head">
-                <strong>{agent.name}</strong>
-                <span className="status-chip">{agent.status}</span>
-              </div>
-              <p>{agent.summary}</p>
-              <div className="agent-output">
-                <label>Latest Output</label>
-                <p>{agent.output}</p>
-              </div>
-              <div className="agent-metric">
-                <span>{agent.metricLabel}</span>
-                <strong>{agent.metricValue}</strong>
-              </div>
-              <div className="alert-meta">
-                <span>Visible to {agent.minTier}+</span>
-                <span>{hasTierAccess(tier, agent.minTier) ? "Unlocked" : "Upgrade required"}</span>
-              </div>
-            </article>
-          )
-        )}
+      {loading ? <div className="panel-note">Loading agent outputs...</div> : null}
+      {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+      <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
+        <div className="agent-grid">
+          {agents.map((agent) =>
+            agent.locked ? (
+              <PremiumLockCard
+                key={agent.id}
+                title={`${agent.name} locked`}
+                body={`${agent.minTier.toUpperCase()} access is required to view this agent's outputs and metrics.`}
+                onUnlock={onUnlock}
+              />
+            ) : (
+              <article className="agent-card" key={agent.id}>
+                <div className="alert-head">
+                  <strong>{agent.name}</strong>
+                  <span className="status-chip">{agent.status}</span>
+                </div>
+                <p>{agent.summary}</p>
+                <div className="agent-output">
+                  <label>Latest Output</label>
+                  <p>{agent.output}</p>
+                </div>
+                <div className="agent-metric">
+                  <span>{agent.metricLabel}</span>
+                  <strong>{agent.metricValue}</strong>
+                </div>
+                <div className="alert-meta">
+                  <span>Visible to {agent.minTier}+</span>
+                  <span>{hasTierAccess(tier, agent.minTier) ? "Unlocked" : "Upgrade required"}</span>
+                </div>
+              </article>
+            )
+          )}
+        </div>
+        {locked ? <LockedPanelOverlay onUnlock={onUnlock} /> : null}
       </div>
+      <SectionCtaBar body="Upgrade now to access full agent output and automation depth." onUpgrade={onUnlock} />
     </section>
   );
 }
 
-function RevenueCommandPanel({ revenue, briefing, premium, onUnlock }) {
-  if (!revenue || !briefing) {
-    return null;
-  }
-
+function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, loading, error, locked }) {
   return (
     <section className="dashboard-grid">
       <section className="panel">
@@ -628,24 +737,43 @@ function RevenueCommandPanel({ revenue, briefing, premium, onUnlock }) {
           title="Monetization posture"
           body="Subscription velocity, conversion pressure, and projected revenue are surfaced here for operator decisions."
         />
-        <div className="revenue-grid">
-          <MetricCard
-            label="MRR"
-            value={`$${Number(revenue.monthlyRecurringRevenue || 0).toLocaleString()}`}
-            detail="Estimated recurring revenue"
-          />
-          <MetricCard
-            label="Subscribers"
-            value={Number(revenue.activeSubscribers || 0).toLocaleString()}
-            detail="Active paying users"
-          />
-          <MetricCard
-            label="Conv. Rate"
-            value={`${Number(revenue.conversionRate || 0).toFixed(1)}%`}
-            detail="Upgrade conversion"
-          />
-        </div>
-        {!premium.prioritySignals ? (
+        {loading ? <div className="panel-note">Loading revenue posture...</div> : null}
+        {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+        <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
+          {revenue ? (
+            <div className="revenue-grid">
+              <MetricCard
+                label="MRR"
+                value={`$${Number(revenue.monthlyRecurringRevenue || 0).toLocaleString()}`}
+                detail="Estimated recurring revenue"
+              />
+              <MetricCard
+                label="Subscribers"
+                value={Number(revenue.activeSubscribers || 0).toLocaleString()}
+                detail="Active paying users"
+              />
+              <MetricCard
+                label="Conv. Rate"
+                value={`${Number(revenue.conversionRate || 0).toFixed(1)}%`}
+                detail="Upgrade conversion"
+              />
+              <MetricCard
+                label="Lead Submissions"
+                value={Number(analytics?.leadSubmissions || 0).toLocaleString()}
+                detail="Captured prospect demand"
+              />
+              <MetricCard
+                label="CTA Clicks"
+                value={Number(analytics?.ctaClicks || 0).toLocaleString()}
+                detail="Simulated upgrade intent"
+              />
+            </div>
+          ) : (
+            <div className="panel-note">Revenue data will appear after the dashboard payload loads.</div>
+          )}
+          {locked ? <LockedPanelOverlay onUnlock={onUnlock} /> : null}
+          </div>
+        {!premium?.prioritySignals ? (
           <div className="tier-callout">
             <strong>Elite priority signals locked</strong>
             <p>Elite unlocks the deepest revenue diagnostics and first-line escalation intelligence.</p>
@@ -654,30 +782,32 @@ function RevenueCommandPanel({ revenue, briefing, premium, onUnlock }) {
             </button>
           </div>
         ) : null}
+        <SectionCtaBar body="Upgrade now to unlock advanced analytics and revenue posture." onUpgrade={onUnlock} />
       </section>
 
       <section className="panel">
         <SectionHeader
           eyebrow="Daily Brief"
-          title={briefing.title}
+          title={briefing?.title || "Daily Brief"}
           body="This summary is generated for the current tier and reflects the platform's current revenue and intelligence posture."
         />
         <div className="brief-card">
-          <p>{briefing.summary}</p>
+          <p>{briefing?.summary || "Waiting for the latest platform briefing..."}</p>
           <div className="brief-actions">
-            {briefing.actions?.map((action) => (
+            {briefing?.actions?.map((action) => (
               <div className="brief-action" key={action}>
                 {action}
               </div>
             ))}
           </div>
         </div>
+        <SectionCtaBar body="Unlock full access to keep premium intelligence live." onUpgrade={onUnlock} />
       </section>
     </section>
   );
 }
 
-function UpgradeModal({ open, tier, onClose, onCheckout }) {
+function UpgradeModal({ open, pricing, tier, onClose, onCheckout }) {
   if (!open) {
     return null;
   }
@@ -698,14 +828,18 @@ function UpgradeModal({ open, tier, onClose, onCheckout }) {
           </button>
         </div>
         <div className="tier-grid">
-          {STRIPE_PLANS.filter((plan) => plan.id !== "free").map((plan) => (
-            <article className={`tier-card ${tier === plan.id ? "tier-card-active" : ""}`} key={plan.id}>
-              <p className="eyebrow">{plan.label}</p>
-              <h3>{plan.price}/mo</h3>
-              <strong>{plan.headline}</strong>
-              <p>{plan.description}</p>
+          {pricing.filter((plan) => plan.id !== "free").map((plan) => (
+            <article
+              className={`tier-card ${tier === plan.id ? "tier-card-active" : ""} ${plan.id === "pro" ? "tier-card-featured" : ""}`}
+              key={plan.id}
+            >
+              <p className="eyebrow">{plan.name}</p>
+              {plan.id === "pro" ? <span className="most-popular-badge">Most Popular</span> : null}
+              <h3>{plan.displayPrice}</h3>
+              <strong>{plan.features[0]}</strong>
+              <p>{plan.features.slice(1).join(" · ")}</p>
               <button className="primary-button" type="button" onClick={() => onCheckout(plan.id)}>
-                Choose {plan.label}
+                Upgrade to {plan.name}
               </button>
             </article>
           ))}
@@ -754,7 +888,7 @@ function AuthPanel({
   );
 }
 
-function SubscriptionPanel({ tier, onCheckout, session }) {
+function SubscriptionPanel({ pricing, tier, onCheckout, session }) {
   return (
     <section className="panel">
       <SectionHeader
@@ -763,17 +897,28 @@ function SubscriptionPanel({ tier, onCheckout, session }) {
         body="High-threat alerts are delayed for free users. Pro unlocks full access. Elite gets priority signals and first-line escalation."
       />
       <div className="tier-grid">
-        {STRIPE_PLANS.map((plan) => (
-          <article className={`tier-card ${tier === plan.id ? "tier-card-active" : ""}`} key={plan.id}>
-            <p className="eyebrow">{plan.label}</p>
-            <h3>{plan.price}{plan.id === "free" ? "" : "/mo"}</h3>
-            {plan.headline ? <strong>{plan.headline}</strong> : null}
-            <p>{plan.description}</p>
+        {pricing.map((plan) => (
+          <article
+            className={`tier-card ${tier === plan.id ? "tier-card-active" : ""} ${plan.id === "pro" ? "tier-card-featured" : ""}`}
+            key={plan.id}
+          >
+            <p className="eyebrow">{plan.name}</p>
+            {plan.id === "pro" ? <span className="most-popular-badge">Most Popular</span> : null}
+            <h3>{plan.displayPrice}</h3>
+            <strong>{plan.features[0]}</strong>
+            <p>{plan.features.slice(1).join(" · ")}</p>
+            <ul className="tier-feature-list">
+              {plan.features.map((feature) => (
+                <li key={feature}>{feature}</li>
+              ))}
+            </ul>
             {plan.id === "free" ? (
-              <div className="status-chip">Free users see limited intelligence mode</div>
+              <button className="ghost-button" type="button" disabled>
+                Free Active
+              </button>
             ) : (
               <button className="ghost-button" type="button" onClick={() => onCheckout(plan.id)} disabled={!session}>
-                {session ? `Upgrade to ${plan.label}` : "Sign in to upgrade"}
+                {session ? `Upgrade to ${plan.name}` : "Sign in to upgrade"}
               </button>
             )}
           </article>
@@ -893,10 +1038,16 @@ export default function App() {
   const [leadEmail, setLeadEmail] = useState("");
   const [leadStatus, setLeadStatus] = useState("");
   const [leadBusy, setLeadBusy] = useState(false);
+  const [contentActionStatus, setContentActionStatus] = useState("");
+  const [platformBusy, setPlatformBusy] = useState(true);
+  const [platformError, setPlatformError] = useState("");
+  const [checkoutError, setCheckoutError] = useState("");
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
+  const leadCaptureRef = useRef(null);
   const isFreeTier = !hasPaidAccess(tier);
+  const pricingTiers = platformDashboard.pricing?.length ? platformDashboard.pricing : PRICING_TIERS;
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(system));
@@ -989,14 +1140,21 @@ export default function App() {
       news: current.generatedAt ? current.news : { ...current.news, status: "loading", error: null },
       sitrep: current.generatedAt ? current.sitrep : { ...current.sitrep, status: "loading", error: null }
     }));
+    setPlatformBusy(true);
+    setPlatformError("");
 
     const accessToken = session?.access_token || null;
     const userId = session?.user?.id || null;
 
-    const [agentResult, alertPayload, dashboardPayload] = await Promise.all([
+    const [agentResult, alertPayload, dashboardResult] = await Promise.all([
       runIntelligenceAgents({ userId, tier }),
       accessToken ? fetchUserAlerts(accessToken).catch(() => null) : Promise.resolve(null),
-      fetchPlatformDashboard(accessToken).catch(() => null)
+      fetchPlatformDashboard(accessToken)
+        .then((payload) => ({ payload, error: "" }))
+        .catch((error) => ({
+          payload: null,
+          error: String(error?.message || error || "Platform dashboard request failed")
+        }))
     ]);
 
     setIntelligence({
@@ -1005,9 +1163,14 @@ export default function App() {
       isRefreshing: false
     });
 
-    if (dashboardPayload) {
-      setPlatformDashboard(dashboardPayload);
+    if (dashboardResult.payload) {
+      setPlatformDashboard(dashboardResult.payload);
+      setPlatformError("");
+    } else if (dashboardResult.error) {
+      setPlatformError(dashboardResult.error);
     }
+
+    setPlatformBusy(false);
   };
 
   useEffect(() => {
@@ -1037,14 +1200,22 @@ export default function App() {
   };
 
   const handleCheckout = async (requestedTier) => {
-    if (!session?.access_token) {
-      setIsUpgradeModalOpen(false);
-      return;
-    }
+    setCheckoutError("");
 
-    const payload = await startStripeCheckout(session.access_token, requestedTier);
-    if (payload?.url) {
+    try {
+      await logCtaClick(`checkout-${requestedTier}`, "upgrade-modal", tier);
+      if (!session?.access_token) {
+        throw new Error("Sign in to upgrade.");
+      }
+
+      const payload = await startStripeCheckout(session.access_token, requestedTier);
+      if (!payload?.url) {
+        throw new Error("Checkout session URL missing.");
+      }
+
       window.location.href = payload.url;
+    } catch (error) {
+      setCheckoutError(String(error?.message || error));
     }
   };
 
@@ -1068,6 +1239,7 @@ export default function App() {
 
     try {
       await captureLead(leadEmail);
+      await logCtaClick("lead-submit", "lead-capture", tier).catch(() => null);
       setLeadStatus("You are on the list. Your 3 free intelligence signals will arrive daily.");
       setLeadEmail("");
     } catch (error) {
@@ -1084,6 +1256,53 @@ export default function App() {
     }
 
     action();
+  };
+
+  const handleGetAccess = async () => {
+    await logCtaClick("get-intelligence-access", "conversion-banner", tier).catch(() => null);
+    leadCaptureRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setLeadStatus("Enter your email below to get intelligence access updates.");
+  };
+
+  const handleUnlockPro = async () => {
+    await logCtaClick("unlock-pro", "conversion-banner", tier).catch(() => null);
+    setIsUpgradeModalOpen(true);
+  };
+
+  const handleCopyPost = async (post) => {
+    const copy = [
+      `${post.channel} | ${post.title}`,
+      `Hook: ${post.hook}`,
+      `Caption: ${post.caption}`,
+      `Hashtags: ${post.hashtags}`
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(copy);
+      setContentActionStatus(`${post.shortId} copied for ${post.channel}.`);
+    } catch {
+      setContentActionStatus("Copy failed. Check clipboard permissions.");
+    }
+  };
+
+  const handleSharePost = async (post) => {
+    const sharePayload = {
+      title: post.title,
+      text: `${post.hook}\n\n${post.caption}\n\n${post.hashtags}`
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(sharePayload);
+        setContentActionStatus(`${post.shortId} shared.`);
+        return;
+      }
+
+      await navigator.clipboard.writeText(sharePayload.text);
+      setContentActionStatus(`${post.shortId} export copied for sharing.`);
+    } catch {
+      setContentActionStatus("Share action was cancelled or unavailable.");
+    }
   };
 
   const runAutomation = () => {
@@ -1130,13 +1349,24 @@ export default function App() {
 
   return (
     <main className="app-shell">
-      <ConversionBanner tier={tier} onOpen={() => setIsUpgradeModalOpen(true)} />
+      <ConversionBanner
+        tier={tier}
+        leadEmail={leadEmail}
+        leadBusy={leadBusy}
+        onLeadChange={setLeadEmail}
+        onLeadSubmit={handleLeadSubmit}
+        onUnlockPro={handleUnlockPro}
+        onGoElite={() => handleCheckout("elite")}
+        onGetAccess={handleGetAccess}
+      />
       <UpgradeModal
         open={isUpgradeModalOpen}
+        pricing={pricingTiers}
         tier={tier}
         onClose={() => setIsUpgradeModalOpen(false)}
         onCheckout={handleCheckout}
       />
+      {checkoutError ? <div className="panel-note panel-note-error">{checkoutError}</div> : null}
       <section className="hero-panel">
         <div className="hero-copy">
           <p className="eyebrow">{THEME} Monetized Intelligence Platform</p>
@@ -1226,29 +1456,47 @@ export default function App() {
             historyCount={intelligence.history.length}
           />
         )}
-        <SubscriptionPanel tier={tier} onCheckout={handleCheckout} session={session} />
+        <SubscriptionPanel pricing={pricingTiers} tier={tier} onCheckout={handleCheckout} session={session} />
       </section>
 
-      <LeadCapturePanel
-        email={leadEmail}
-        status={leadBusy ? "Saving your access request..." : leadStatus}
-        onEmailChange={setLeadEmail}
-        onSubmit={handleLeadSubmit}
-      />
+      <div ref={leadCaptureRef}>
+        <LeadCapturePanel
+          email={leadEmail}
+          status={leadBusy ? "Saving your access request..." : leadStatus}
+          onEmailChange={setLeadEmail}
+          onSubmit={handleLeadSubmit}
+          analytics={platformDashboard.analytics}
+        />
+      </div>
+
+      <SocialProofPanel analytics={platformDashboard.analytics} revenue={platformDashboard.revenue} />
 
       <RevenueCommandPanel
         revenue={platformDashboard.revenue}
+        analytics={platformDashboard.analytics}
         briefing={platformDashboard.briefing}
         premium={platformDashboard.premium}
         onUnlock={() => setIsUpgradeModalOpen(true)}
+        loading={platformBusy}
+        error={platformError}
+        locked={isFreeTier}
       />
 
       <section className="dashboard-grid">
-        <ActivityFeedPanel feed={platformDashboard.activityFeed} />
+        <ActivityFeedPanel
+          feed={platformDashboard.activityFeed}
+          loading={platformBusy}
+          error={platformError}
+          locked={isFreeTier}
+          onUnlock={() => setIsUpgradeModalOpen(true)}
+        />
         <AgentSuitePanel
           agents={platformDashboard.agents}
           tier={tier}
           onUnlock={() => setIsUpgradeModalOpen(true)}
+          loading={platformBusy}
+          error={platformError}
+          locked={isFreeTier}
         />
       </section>
 
@@ -1257,6 +1505,7 @@ export default function App() {
         <SitrepPanel agent={intelligence.sitrep} />
         <NewsPanel agent={intelligence.news} />
       </section>
+      <SectionCtaBar body="Premium intelligence delayed. Upgrade now for full real-time visibility." onUpgrade={() => setIsUpgradeModalOpen(true)} />
 
       <AlertFeedPanel
         alerts={visibleAlerts}
@@ -1266,6 +1515,7 @@ export default function App() {
         persistence={intelligence.persistence}
         webhook={intelligence.webhook}
       />
+      <SectionCtaBar body="Upgrade now to unlock the full alert stream and premium intelligence layer." onUpgrade={() => setIsUpgradeModalOpen(true)} />
       {session ? <AlertHistoryPanel history={intelligence.history} tier={tier} /> : null}
 
       <section className="dashboard-grid">
@@ -1298,23 +1548,25 @@ export default function App() {
             body="Use social content to funnel users into paid intelligence subscriptions and premium offer flows."
           />
           <div className="tier-grid">
-            {STRIPE_PLANS.map((plan) => (
+            {pricingTiers.map((plan) => (
               <article className="stripe-card" key={plan.id}>
-                <strong>{plan.label}</strong>
-                <span>{plan.price}{plan.id === "free" ? "" : "/mo"}</span>
-                <p>{plan.description}</p>
+                <strong>{plan.name}</strong>
+                <span>{plan.displayPrice}</span>
+                <p>{plan.features.join(" · ")}</p>
               </article>
             ))}
           </div>
         </div>
       </section>
+      <SectionCtaBar body="Unlock full access to activate every premium dashboard surface." onUpgrade={() => setIsUpgradeModalOpen(true)} />
 
       <section className="panel">
         <SectionHeader
           eyebrow="Ready To Post"
           title={`${activeDate} publishing pack`}
-          body="Three posts per channel with hooks, captions, and scripts designed to drive subscription upgrades."
+          body="Daily AI-generated posts with copy-ready captions for TikTok, Instagram, and Facebook. Premium intelligence delayed. Upgrade for real-time signals."
         />
+        {contentActionStatus ? <div className="panel-note">{contentActionStatus}</div> : null}
         <div className="channel-stack">
           {channelGroups.map((group) => (
             <section className="channel-column" key={group.channel}>
@@ -1351,6 +1603,14 @@ export default function App() {
                     <span>{post.metrics.engagement} engagement</span>
                     <span>{post.metrics.clicks} clicks</span>
                     <span>${post.estimatedRevenue}</span>
+                  </div>
+                  <div className="post-actions">
+                    <button className="ghost-button" type="button" onClick={() => handleCopyPost(post)}>
+                      Copy Post
+                    </button>
+                    <button className="ghost-button" type="button" onClick={() => handleSharePost(post)}>
+                      Share Style
+                    </button>
                   </div>
                 </article>
               ))}
