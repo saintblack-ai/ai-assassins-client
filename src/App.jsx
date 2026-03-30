@@ -16,6 +16,7 @@ import {
   signIn,
   signOut,
   signUp,
+  toFriendlyAuthError,
   subscribeToAuthChanges
 } from "./lib/platform";
 import "./app.css";
@@ -24,7 +25,13 @@ const BRAND = "Saint Black";
 const THEME = "ARCHAIOS";
 const CHANNELS = ["TikTok", "Instagram", "Facebook"];
 const STORAGE_KEY = "saint-black-marketing-system-v5";
+const PENDING_CHECKOUT_KEY = "saint-black-pending-checkout-tier";
 const REFRESH_INTERVAL_MS = 60000;
+const AUTH_STATES = {
+  signedOut: "signed-out",
+  signedIn: "signed-in",
+  confirmationNeeded: "email-confirmation-needed"
+};
 
 const CONTENT_PILLARS = [
   {
@@ -286,6 +293,33 @@ function formatTime(value) {
   });
 }
 
+function formatDateTime(value) {
+  if (!value) {
+    return "Not available";
+  }
+
+  return new Date(value).toLocaleString();
+}
+
+function normalizeSubscriptionState(subscription, tier) {
+  return {
+    tier: subscription?.tier || tier || "free",
+    status: subscription?.status || (hasPaidAccess(subscription?.tier || tier) ? "active" : "free"),
+    paid: Boolean(subscription?.paid ?? hasPaidAccess(subscription?.tier || tier)),
+    currentPeriodEnd: subscription?.currentPeriodEnd || null
+  };
+}
+
+function getCheckoutStateFromLocation() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const state = params.get("checkout");
+  return state === "success" || state === "cancel" ? state : "";
+}
+
 function levelLabel(level) {
   if (level === "high") {
     return "High threat";
@@ -324,6 +358,22 @@ function filterVisibleAlerts(alerts, tier) {
     return alerts;
   }
   return alerts.filter((alert) => alert.level !== "high").slice(0, 10);
+}
+
+function getSubscriptionStatusLabel(status) {
+  if (status === "active") {
+    return "Active";
+  }
+  if (status === "trialing") {
+    return "Trialing";
+  }
+  if (status === "past_due") {
+    return "Past due";
+  }
+  if (status === "canceled") {
+    return "Canceled";
+  }
+  return "Free";
 }
 
 function MetricCard({ label, value, detail }) {
@@ -850,15 +900,18 @@ function UpgradeModal({ open, pricing, tier, onClose, onCheckout }) {
 }
 
 function AuthPanel({
+  authState,
   authMode,
   email,
   password,
   authBusy,
   authError,
+  authNotice,
   onModeChange,
   onEmailChange,
   onPasswordChange,
   onSubmit,
+  onConfirmationRetry,
   enabled
 }) {
   return (
@@ -866,8 +919,19 @@ function AuthPanel({
       <SectionHeader
         eyebrow="User Auth"
         title="Supabase access"
-        body={enabled ? "Sign in to persist alerts, unlock subscriptions, and personalize intelligence." : "Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable auth."}
+        body={
+          enabled
+            ? authState === AUTH_STATES.confirmationNeeded
+              ? "Account created. Confirm your email, then return here to continue."
+              : "Sign in to persist alerts, unlock subscriptions, and personalize intelligence."
+            : "Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable auth."
+        }
       />
+      <div className="status-row status-row-wrap">
+        <div className="status-chip">
+          Auth state: {authState === AUTH_STATES.signedIn ? "Signed in" : authState === AUTH_STATES.confirmationNeeded ? "Email confirmation needed" : "Signed out"}
+        </div>
+      </div>
       <div className="auth-toggle">
         <button className={authMode === "signin" ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signin")}>
           Sign In
@@ -879,16 +943,24 @@ function AuthPanel({
       <form className="auth-form" onSubmit={onSubmit}>
         <input className="auth-input" type="email" value={email} onChange={(event) => onEmailChange(event.target.value)} placeholder="Email" required disabled={!enabled || authBusy} />
         <input className="auth-input" type="password" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="Password" required disabled={!enabled || authBusy} />
+        {authNotice ? <p className="panel-note">{authNotice}</p> : null}
         {authError ? <p className="auth-error">{authError}</p> : null}
         <button className="primary-button" type="submit" disabled={!enabled || authBusy}>
           {authBusy ? "Working..." : authMode === "signin" ? "Sign In" : "Create Account"}
         </button>
+        {authState === AUTH_STATES.confirmationNeeded ? (
+          <button className="ghost-button" type="button" onClick={onConfirmationRetry} disabled={!enabled || authBusy}>
+            I confirmed my email, continue
+          </button>
+        ) : null}
       </form>
     </section>
   );
 }
 
-function SubscriptionPanel({ pricing, tier, onCheckout, session }) {
+function SubscriptionPanel({ pricing, tier, subscription, onCheckout, session, authState }) {
+  const account = normalizeSubscriptionState(subscription, tier);
+
   return (
     <section className="panel">
       <SectionHeader
@@ -916,9 +988,13 @@ function SubscriptionPanel({ pricing, tier, onCheckout, session }) {
               <button className="ghost-button" type="button" disabled>
                 Free Active
               </button>
+            ) : account.paid && account.tier === plan.id ? (
+              <button className="ghost-button" type="button" disabled>
+                {getSubscriptionStatusLabel(account.status)}
+              </button>
             ) : (
               <button className="ghost-button" type="button" onClick={() => onCheckout(plan.id)} disabled={!session}>
-                {session ? `Upgrade to ${plan.name}` : "Sign in to upgrade"}
+                {session ? `Upgrade to ${plan.name}` : authState === AUTH_STATES.confirmationNeeded ? "Confirm email to upgrade" : "Sign in to upgrade"}
               </button>
             )}
           </article>
@@ -929,6 +1005,8 @@ function SubscriptionPanel({ pricing, tier, onCheckout, session }) {
 }
 
 function UserPanel({ session, tier, subscription, onSignOut, historyCount }) {
+  const account = normalizeSubscriptionState(subscription, tier);
+
   return (
     <section className="panel">
       <SectionHeader
@@ -941,18 +1019,49 @@ function UserPanel({ session, tier, subscription, onSignOut, historyCount }) {
       <div className="user-grid">
         <article className="memory-card">
           <strong>{session?.user?.email || "Guest"}</strong>
-          <span>Tier: {tier}</span>
-          <span>{hasPaidAccess(tier) ? "Paid access enabled" : "Free users see limited intelligence mode"}</span>
+          <span>Tier: {account.tier}</span>
+          <span>{account.paid ? "Paid access enabled" : "Free users see limited intelligence mode"}</span>
+        </article>
+        <article className="memory-card">
+          <strong>Account Status</strong>
+          <span>{getSubscriptionStatusLabel(account.status)}</span>
+          <span>{account.currentPeriodEnd ? `Current period ends ${formatDateTime(account.currentPeriodEnd)}` : "No paid billing period on file"}</span>
         </article>
         <article className="memory-card">
           <strong>/api/alerts</strong>
-          <span>{hasPaidAccess(tier) ? "Full alert payloads" : "High-threat alerts are delayed for free users"}</span>
-          <span>{tier === "elite" ? "Priority signals enabled" : "Priority signals locked"}</span>
+          <span>{account.paid ? "Full alert payloads" : "High-threat alerts are delayed for free users"}</span>
+          <span>{account.tier === "elite" ? "Priority signals enabled" : "Priority signals locked"}</span>
         </article>
         <article className="memory-card">
           <strong>History</strong>
           <span>{historyCount} alerts loaded</span>
-          <span>{subscription?.paid ? "Billing active" : "Upgrade to unlock more"}</span>
+          <span>{account.paid ? "Billing active" : "Upgrade to unlock more"}</span>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function AccountStatusPanel({ subscription }) {
+  const account = normalizeSubscriptionState(subscription, subscription?.tier || "free");
+
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="Account Status"
+        title="Current plan state"
+        body="This panel reflects the subscription record currently loaded from the backend."
+      />
+      <div className="user-grid">
+        <article className="memory-card">
+          <strong>{account.tier.toUpperCase()}</strong>
+          <span>Plan tier</span>
+          <span>{account.paid ? "Premium UI unlocked" : "Premium UI locked"}</span>
+        </article>
+        <article className="memory-card">
+          <strong>{getSubscriptionStatusLabel(account.status)}</strong>
+          <span>Billing status</span>
+          <span>{account.currentPeriodEnd ? `Ends ${formatDateTime(account.currentPeriodEnd)}` : "No active billing period"}</span>
         </article>
       </div>
     </section>
@@ -1035,18 +1144,31 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
+  const [authState, setAuthState] = useState(AUTH_STATES.signedOut);
+  const [pendingCheckoutTier, setPendingCheckoutTier] = useState(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+
+    return window.localStorage.getItem(PENDING_CHECKOUT_KEY) || "";
+  });
   const [leadEmail, setLeadEmail] = useState("");
   const [leadStatus, setLeadStatus] = useState("");
   const [leadBusy, setLeadBusy] = useState(false);
   const [contentActionStatus, setContentActionStatus] = useState("");
   const [platformBusy, setPlatformBusy] = useState(true);
   const [platformError, setPlatformError] = useState("");
+  const [checkoutNotice, setCheckoutNotice] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
+  const [checkoutState, setCheckoutState] = useState(() => getCheckoutStateFromLocation());
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
   const leadCaptureRef = useRef(null);
-  const isFreeTier = !hasPaidAccess(tier);
+  const checkoutRetryRef = useRef(false);
+  const effectiveSubscription = normalizeSubscriptionState(subscription, tier);
+  const isFreeTier = !effectiveSubscription.paid;
   const pricingTiers = platformDashboard.pricing?.length ? platformDashboard.pricing : PRICING_TIERS;
 
   useEffect(() => {
@@ -1058,6 +1180,54 @@ export default function App() {
     const authListener = subscribeToAuthChanges((nextSession) => setSession(nextSession));
     return () => authListener.data.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!checkoutState) {
+      return;
+    }
+
+    if (checkoutState === "success") {
+      setCheckoutNotice("Checkout completed. Subscription status is refreshing.");
+      setAuthNotice("Checkout completed. Refreshing your subscription access.");
+      setPendingCheckoutTier("");
+    }
+
+    if (checkoutState === "cancel") {
+      setCheckoutNotice("");
+      setCheckoutError("Checkout was canceled. Your plan has not changed.");
+    }
+
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("checkout");
+      window.history.replaceState({}, "", url.toString());
+    }
+
+    setCheckoutState("");
+  }, [checkoutState]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (pendingCheckoutTier) {
+      window.localStorage.setItem(PENDING_CHECKOUT_KEY, pendingCheckoutTier);
+      return;
+    }
+
+    window.localStorage.removeItem(PENDING_CHECKOUT_KEY);
+  }, [pendingCheckoutTier]);
+
+  useEffect(() => {
+    if (session?.user?.id) {
+      setAuthState(AUTH_STATES.signedIn);
+      setAuthError("");
+      return;
+    }
+
+    setAuthState((current) => (current === AUTH_STATES.confirmationNeeded ? current : AUTH_STATES.signedOut));
+  }, [session?.user?.id]);
 
   useEffect(() => {
     async function loadSubscriptionState() {
@@ -1076,11 +1246,11 @@ export default function App() {
 
       const resolvedTier = serverSubscription?.tier || fallbackTier || "free";
       setTier(resolvedTier);
-      setSubscription(serverSubscription || { tier: resolvedTier, paid: hasPaidAccess(resolvedTier) });
+      setSubscription(serverSubscription || { tier: resolvedTier, status: hasPaidAccess(resolvedTier) ? "active" : "free", paid: hasPaidAccess(resolvedTier) });
     }
 
     loadSubscriptionState();
-  }, [session]);
+  }, [checkoutState, session]);
 
   useEffect(() => {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -1179,33 +1349,69 @@ export default function App() {
     return () => window.clearInterval(intervalId);
   }, [session?.user?.id, tier]);
 
+  useEffect(() => {
+    if (!session?.access_token) {
+      checkoutRetryRef.current = false;
+      return;
+    }
+
+    if (!pendingCheckoutTier || checkoutRetryRef.current) {
+      return;
+    }
+
+    checkoutRetryRef.current = true;
+    setAuthNotice("Email confirmed. Resuming checkout.");
+    handleCheckout(pendingCheckoutTier, { autoRetry: true }).catch(() => {});
+  }, [pendingCheckoutTier, session?.access_token]);
+
   const handleAuthSubmit = async (event) => {
     event.preventDefault();
     setAuthBusy(true);
     setAuthError("");
+    setAuthNotice("");
 
     try {
       if (authMode === "signin") {
         await signIn(email, password);
+        setAuthState(AUTH_STATES.signedIn);
+        setEmail("");
       } else {
-        await signUp(email, password);
+        const result = await signUp(email, password);
+        if (result?.session) {
+          setAuthState(AUTH_STATES.signedIn);
+          setEmail("");
+        } else {
+          setAuthState(AUTH_STATES.confirmationNeeded);
+          setAuthMode("signin");
+          setAuthNotice(
+            pendingCheckoutTier
+              ? "Check your inbox, confirm your email, then sign in. Your pending Pro or Elite checkout will resume automatically."
+              : "Check your inbox, confirm your email, then sign in."
+          );
+        }
       }
-      setEmail("");
       setPassword("");
     } catch (error) {
-      setAuthError(String(error?.message || error));
+      setAuthError(toFriendlyAuthError(error, authMode));
     } finally {
       setAuthBusy(false);
     }
   };
 
-  const handleCheckout = async (requestedTier) => {
+  const handleCheckout = async (requestedTier, options = {}) => {
+    setCheckoutNotice("");
     setCheckoutError("");
 
     try {
       await logCtaClick(`checkout-${requestedTier}`, "upgrade-modal", tier);
       if (!session?.access_token) {
-        throw new Error("Sign in to upgrade.");
+        setPendingCheckoutTier(requestedTier);
+        setAuthMode("signin");
+        throw new Error(
+          authState === AUTH_STATES.confirmationNeeded
+            ? "Confirm your email, then sign in to continue to checkout."
+            : "Sign in to continue to checkout."
+        );
       }
 
       const payload = await startStripeCheckout(session.access_token, requestedTier);
@@ -1213,9 +1419,15 @@ export default function App() {
         throw new Error("Checkout session URL missing.");
       }
 
+      setPendingCheckoutTier("");
+      setAuthNotice(options.autoRetry ? "Checkout ready. Redirecting now." : "");
       window.location.href = payload.url;
     } catch (error) {
       setCheckoutError(String(error?.message || error));
+      if (options.autoRetry) {
+        checkoutRetryRef.current = false;
+        throw error;
+      }
     }
   };
 
@@ -1230,7 +1442,33 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    setAuthState(AUTH_STATES.signedOut);
+    setAuthNotice("");
+    setPendingCheckoutTier("");
     await signOut();
+  };
+
+  const handleConfirmationRetry = async () => {
+    setAuthBusy(true);
+    setAuthError("");
+
+    try {
+      const nextSession = await getCurrentSession();
+      setSession(nextSession);
+
+      if (nextSession?.access_token) {
+        setAuthState(AUTH_STATES.signedIn);
+        setAuthNotice(pendingCheckoutTier ? "Email confirmed. Continuing to checkout." : "Email confirmed. You are signed in.");
+        return;
+      }
+
+      setAuthMode("signin");
+      setAuthNotice("Email confirmed. Sign in to continue.");
+    } catch (error) {
+      setAuthError(toFriendlyAuthError(error, "signin"));
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const handleLeadSubmit = async (event) => {
@@ -1362,10 +1600,11 @@ export default function App() {
       <UpgradeModal
         open={isUpgradeModalOpen}
         pricing={pricingTiers}
-        tier={tier}
+        tier={effectiveSubscription.tier}
         onClose={() => setIsUpgradeModalOpen(false)}
         onCheckout={handleCheckout}
       />
+      {checkoutNotice ? <div className="panel-note">{checkoutNotice}</div> : null}
       {checkoutError ? <div className="panel-note panel-note-error">{checkoutError}</div> : null}
       <section className="hero-panel">
         <div className="hero-copy">
@@ -1405,13 +1644,20 @@ export default function App() {
           <div className="status-row">
             <StatusIndicator status={currentStatus} label={currentStatus === "live" ? "Live" : "Offline"} />
             <AlertBadge level={intelligence.systemLevel} />
-            <div className="status-chip">Tier: {tier}</div>
+            <div className="status-chip">Tier: {effectiveSubscription.tier}</div>
             <div className="status-chip">Last sync: {formatTime(intelligence.generatedAt)}</div>
             {intelligence.isRefreshing ? <div className="status-chip">Refreshing live feeds...</div> : null}
           </div>
           <div className="status-chip">Auth: {session?.user?.email || "Guest mode"}</div>
           <div className="status-chip">
-            Paid access: {hasPaidAccess(tier) ? "Unlocked" : "Free users see limited intelligence mode"}
+            {authState === AUTH_STATES.signedIn
+              ? "Signed in"
+              : authState === AUTH_STATES.confirmationNeeded
+                ? "Email confirmation needed"
+                : "Signed out"}
+          </div>
+          <div className="status-chip">
+            Paid access: {effectiveSubscription.paid ? "Unlocked" : "Free users see limited intelligence mode"}
           </div>
           <div className="signal-grid">
             <MetricCard
@@ -1436,27 +1682,31 @@ export default function App() {
       <section className="dashboard-grid">
         {!session ? (
           <AuthPanel
+            authState={authState}
             authMode={authMode}
             email={email}
             password={password}
             authBusy={authBusy}
             authError={authError}
+            authNotice={authNotice}
             onModeChange={setAuthMode}
             onEmailChange={setEmail}
             onPasswordChange={setPassword}
             onSubmit={handleAuthSubmit}
+            onConfirmationRetry={handleConfirmationRetry}
             enabled={isSupabaseEnabled}
           />
         ) : (
           <UserPanel
             session={session}
-            tier={tier}
+            tier={effectiveSubscription.tier}
             subscription={subscription}
             onSignOut={handleSignOut}
             historyCount={intelligence.history.length}
           />
         )}
-        <SubscriptionPanel pricing={pricingTiers} tier={tier} onCheckout={handleCheckout} session={session} />
+        <AccountStatusPanel subscription={effectiveSubscription} />
+        <SubscriptionPanel pricing={pricingTiers} tier={effectiveSubscription.tier} subscription={subscription} onCheckout={handleCheckout} session={session} authState={authState} />
       </section>
 
       <div ref={leadCaptureRef}>

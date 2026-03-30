@@ -30,10 +30,12 @@ export async function signIn(email, password) {
     throw new Error("Supabase auth is not configured");
   }
 
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
     throw error;
   }
+
+  return data;
 }
 
 export async function signUp(email, password) {
@@ -41,10 +43,12 @@ export async function signUp(email, password) {
     throw new Error("Supabase auth is not configured");
   }
 
-  const { error } = await supabase.auth.signUp({ email, password });
+  const { data, error } = await supabase.auth.signUp({ email, password });
   if (error) {
     throw error;
   }
+
+  return data;
 }
 
 export async function signOut() {
@@ -141,4 +145,30 @@ export async function logCtaClick(cta, location, tier = "free") {
       tier
     })
   });
+}
+
+export function toFriendlyAuthError(error, mode = "signin") {
+  const message = String(error?.message || error || "Authentication failed");
+  const lowered = message.toLowerCase();
+
+  if (
+    lowered.includes("rate limit") ||
+    lowered.includes("too many requests") ||
+    lowered.includes("security purposes") ||
+    lowered.includes("over_email_send_rate_limit")
+  ) {
+    return mode === "signup"
+      ? "Too many sign-up or confirmation email attempts. Wait a minute, then try again or check the last confirmation email you already received."
+      : "Too many sign-in attempts. Wait a minute, then try again.";
+  }
+
+  if (lowered.includes("email not confirmed") || lowered.includes("email_not_confirmed")) {
+    return "Check your inbox and confirm your email before signing in.";
+  }
+
+  if (lowered.includes("invalid login credentials")) {
+    return "Email or password is incorrect.";
+  }
+
+  return message;
 }
