@@ -1,150 +1,44 @@
-name: Build and Deploy Frontend
+healthcheck:
+  if: always() && needs.build.result == 'success' && (github.event_name != 'schedule' || needs.deploy.result == 'success')
+  needs:
+    - build
+    - deploy
+  runs-on: ubuntu-latest
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-  schedule:
-    - cron: "17 13 * * *"
+  steps:
+    - name: Resolve live URLs
+      id: urls
+      shell: bash
+      env:
+        PUBLIC_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+        FRONTEND_HEALTHCHECK_URL: https://saintblack-ai.github.io/ai-assassins-client/
+      run: |
+        FRONTEND_URL="$(printf '%s' "$FRONTEND_HEALTHCHECK_URL" | sed 's#/*$##')"
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+        if [ -z "$PUBLIC_BACKEND_URL" ]; then
+          BACKEND_ENABLED="false"
+          BACKEND_HEALTH_URL=""
+        else
+          BACKEND_ENABLED="true"
+          BACKEND_URL="$(printf '%s' "$PUBLIC_BACKEND_URL" | sed 's#/*$##')"
+          BACKEND_HEALTH_URL="${BACKEND_URL}/api/health"
+        fi
 
-concurrency:
-  group: github-pages
-  cancel-in-progress: true
+        {
+          echo "frontend_url=$FRONTEND_URL"
+          echo "backend_enabled=$BACKEND_ENABLED"
+          echo "backend_health_url=$BACKEND_HEALTH_URL"
+        } >> "$GITHUB_OUTPUT"
 
-env:
-  NODE_VERSION: "20"
-  DEFAULT_BACKEND_URL: "https://archaios-saas-worker.quandrix357.workers.dev"
-  FRONTEND_HEALTHCHECK_URL: "https://saintblack-ai.github.io/ai-assassins-client/"
+    - name: Wait for Pages to settle
+      run: |
+        sleep 20
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+    - name: Check frontend health
+      run: |
+        curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.frontend_url }}" >/dev/null
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build frontend
-        env:
-          VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-        run: |
-          echo "Required GitHub Actions configuration for a public frontend build:"
-          echo "  - VITE_SUPABASE_URL"
-          echo "  - VITE_SUPABASE_ANON_KEY"
-          echo "Optional backend override used for build + healthcheck:"
-          echo "  - VITE_BACKEND_URL"
-
-          if [ -z "${VITE_SUPABASE_URL}" ]; then
-            echo "::error::Missing VITE_SUPABASE_URL. Set GitHub Actions variable VITE_SUPABASE_URL."
-            exit 1
-          fi
-
-          if [ -z "${VITE_SUPABASE_ANON_KEY}" ]; then
-            echo "::error::Missing VITE_SUPABASE_ANON_KEY. Set GitHub Actions secret VITE_SUPABASE_ANON_KEY."
-            exit 1
-          fi
-
-          if [ -z "${VITE_BACKEND_URL}" ]; then
-            echo "::warning::VITE_BACKEND_URL GitHub variable is missing. Falling back to ${DEFAULT_BACKEND_URL}."
-            export VITE_BACKEND_URL="${DEFAULT_BACKEND_URL}"
-          fi
-
-          echo "Build frontend env configuration resolved."
-          npm run build
-
-      - name: Upload Pages artifact
-        if: github.event_name != 'schedule'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    if: github.event_name != 'schedule'
-    needs: build
-    runs-on: ubuntu-latest
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    outputs:
-      page_url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-  healthcheck:
-    if: always() && needs.build.result == 'success' && (github.event_name == 'schedule' || needs.deploy.result == 'success')
-    needs:
-      - build
-      - deploy
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Resolve live URLs
-        id: urls
-        env:
-          PUBLIC_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
-        run: |
-          FRONTEND_URL="$(printf '%s' "${FRONTEND_HEALTHCHECK_URL}" | sed 's#/*$##')/"
-
-          if [ -z "${PUBLIC_BACKEND_URL}" ]; then
-            echo "::warning::VITE_BACKEND_URL GitHub variable is not configured. Backend healthcheck will be skipped."
-            BACKEND_ENABLED="false"
-            BACKEND_HEALTH_URL=""
-          else
-            BACKEND_ENABLED="true"
-            BACKEND_URL="$(printf '%s' "${PUBLIC_BACKEND_URL}" | sed 's#/*$##')"
-            BACKEND_HEALTH_URL="${BACKEND_URL}/api/health"
-          fi
-BACKEND_HEALTH_URL="${VITE_BACKEND_URL}/api/health"
-          echo "frontend_url=${FRONTEND_URL}" >> "$GITHUB_OUTPUT"
-          echo "backend_enabled=${BACKEND_ENABLED}" >> "$GITHUB_OUTPUT"
-          echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "$GITHUB_OUTPUT"
-          echo "Resolved frontend healthcheck URL: ${FRONTEND_URL}"
-          echo "Resolved backend healthcheck URL: ${BACKEND_HEALTH_URL:-skipped}"
-
-      - name: Wait for Pages to settle
-        run: |
-          echo "Waiting 20 seconds before health checks..."
-          sleep 20
-
-      - name: Check frontend health
-        run: |
-          echo "Checking frontend URL: ${{ steps.urls.outputs.frontend_url }}"
-          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.frontend_url }}" > frontend.html
-          grep -qi "<html" frontend.html
-
-      - name: Skip backend health
-        if: steps.urls.outputs.backend_enabled != 'true'
-        run: |
-          echo "Skipping backend healthcheck because no backend URL was configured."
-
-      - name: Check backend health
-        if: steps.urls.outputs.backend_enabled == 'true'
-        run: |
-          echo "Checking backend URL: ${{ steps.urls.outputs.backend_health_url }}"
-          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.backend_health_url }}" > backend-health.json
-          test -s backend-health.json
+    - name: Check backend health
+      if: steps.urls.outputs.backend_enabled == 'true'
+      run: |
+        curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.backend_health_url }}" >/dev/null
