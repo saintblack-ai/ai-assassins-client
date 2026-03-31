@@ -120,9 +120,9 @@ jobs:
             BACKEND_HEALTH_URL="${BACKEND_URL}/api/health"
           fi
 
-          echo "frontend_url=${FRONTEND_URL}" >> "${GITHUB_OUTPUT}"
-          echo "backend_enabled=${BACKEND_ENABLED}" >> "${GITHUB_OUTPUT}"
-          echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_url=${FRONTEND_URL}" >> "$GITHUB_OUTPUT"
+          echo "backend_enabled=${BACKEND_ENABLED}" >> "$GITHUB_OUTPUT"
+          echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "$GITHUB_OUTPUT"
           echo "Resolved frontend healthcheck URL: ${FRONTEND_URL}"
           if [ "${BACKEND_ENABLED}" = "true" ]; then
             echo "Resolved backend healthcheck URL: ${BACKEND_HEALTH_URL}"
