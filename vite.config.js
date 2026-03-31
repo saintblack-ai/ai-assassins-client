@@ -49,5 +49,10 @@ function getPagesBase() {
 
 export default defineConfig({
   base: getPagesBase(),
-  plugins: [react()]
+  plugins: [react()],
+  server: {
+    fs: {
+      allow: [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")]
+    }
+  }
 });

@@ -4,19 +4,21 @@ import { startStripeCheckout } from "./agents/stripeAgent";
 import { PRICING_TIERS } from "./lib/pricing";
 import { isSupabaseEnabled } from "./lib/supabase";
 import {
+  classifyAuthError,
   captureLead,
   clearUserAlerts,
   fetchPlatformDashboard,
   fetchSubscription,
   fetchUserAlerts,
+  getBackendHealthcheckUrl,
   getCurrentSession,
   getUserTier,
   hasPaidAccess,
   logCtaClick,
+  resendConfirmationEmail,
   signIn,
   signOut,
   signUp,
-  toFriendlyAuthError,
   subscribeToAuthChanges
 } from "./lib/platform";
 import "./app.css";
@@ -32,6 +34,15 @@ const AUTH_STATES = {
   signedIn: "signed-in",
   confirmationNeeded: "email-confirmation-needed"
 };
+const AUTH_FEEDBACK_STATES = {
+  idle: "idle",
+  emailSent: "email-sent",
+  waitingConfirmation: "waiting-confirmation",
+  error: "error"
+};
+const SIGNUP_COOLDOWN_SECONDS = 15;
+const RESEND_COOLDOWN_SECONDS = 60;
+const BACKEND_HEALTHCHECK_URL = getBackendHealthcheckUrl();
 
 const CONTENT_PILLARS = [
   {
@@ -107,6 +118,14 @@ function summarizePerformance(posts) {
     },
     { engagement: 0, clicks: 0, estimatedRevenue: 0 }
   );
+}
+
+function withHealthcheckHint(message) {
+  if (!BACKEND_HEALTHCHECK_URL) {
+    return message;
+  }
+
+  return `${message} Health check: ${BACKEND_HEALTHCHECK_URL}`;
 }
 
 function buildPosts(dateKey, options = {}) {
@@ -374,6 +393,50 @@ function getSubscriptionStatusLabel(status) {
     return "Canceled";
   }
   return "Free";
+}
+
+function getPanelState({ loading, error, items, requiresAuth, session }) {
+  if (loading) {
+    return "loading";
+  }
+
+  if (requiresAuth && !session) {
+    return "auth-required";
+  }
+
+  if (error) {
+    return "error";
+  }
+
+  if (Array.isArray(items) && items.length === 0) {
+    return "empty";
+  }
+
+  if (!items) {
+    return "empty";
+  }
+
+  return "live";
+}
+
+function PanelStateNotice({ state, loadingLabel, error, emptyLabel, authLabel }) {
+  if (state === "loading") {
+    return <div className="panel-note">{loadingLabel}</div>;
+  }
+
+  if (state === "auth-required") {
+    return <div className="panel-note">{authLabel}</div>;
+  }
+
+  if (state === "error") {
+    return <div className="panel-note panel-note-error">{error}</div>;
+  }
+
+  if (state === "empty") {
+    return <div className="panel-note">{emptyLabel}</div>;
+  }
+
+  return <div className="panel-note">Live data connected.</div>;
 }
 
 function MetricCard({ label, value, detail }) {
@@ -694,7 +757,15 @@ function SocialProofPanel({ analytics, revenue }) {
   );
 }
 
-function ActivityFeedPanel({ feed, loading, error, locked, onUnlock }) {
+function ActivityFeedPanel({ feed, loading, error, locked, onUnlock, session }) {
+  const state = getPanelState({
+    loading,
+    error,
+    items: feed,
+    requiresAuth: true,
+    session
+  });
+
   return (
     <section className="panel">
       <SectionHeader
@@ -702,8 +773,13 @@ function ActivityFeedPanel({ feed, loading, error, locked, onUnlock }) {
         title="Operational activity stream"
         body="Realtime platform actions from the internal agent layer. Simulated where external signals are unavailable."
       />
-      {loading ? <div className="panel-note">Loading platform activity...</div> : null}
-      {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+      <PanelStateNotice
+        state={state}
+        loadingLabel="Loading platform activity..."
+        error={error}
+        emptyLabel="No live activity yet. Events will appear here after traffic and automation runs."
+        authLabel="Sign in to view your personalized activity stream."
+      />
       <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
         <div className="activity-feed">
           {feed.map((item) => (
@@ -728,7 +804,15 @@ function ActivityFeedPanel({ feed, loading, error, locked, onUnlock }) {
   );
 }
 
-function AgentSuitePanel({ agents, tier, onUnlock, loading, error, locked }) {
+function AgentSuitePanel({ agents, tier, onUnlock, loading, error, locked, session }) {
+  const state = getPanelState({
+    loading,
+    error,
+    items: agents,
+    requiresAuth: true,
+    session
+  });
+
   return (
     <section className="panel">
       <SectionHeader
@@ -736,8 +820,13 @@ function AgentSuitePanel({ agents, tier, onUnlock, loading, error, locked }) {
         title="Internal agent suite"
         body="Content, marketing, traffic, intelligence, conversion, and analytics agents feed the platform with operational outputs."
       />
-      {loading ? <div className="panel-note">Loading agent outputs...</div> : null}
-      {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+      <PanelStateNotice
+        state={state}
+        loadingLabel="Loading agent outputs..."
+        error={error}
+        emptyLabel="No agent outputs are available yet. Generate or refresh intelligence to populate this panel."
+        authLabel="Sign in to view account-linked agent output and premium automation state."
+      />
       <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
         <div className="agent-grid">
           {agents.map((agent) =>
@@ -778,7 +867,15 @@ function AgentSuitePanel({ agents, tier, onUnlock, loading, error, locked }) {
   );
 }
 
-function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, loading, error, locked }) {
+function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, loading, error, locked, session }) {
+  const state = getPanelState({
+    loading,
+    error,
+    items: revenue ? [revenue] : [],
+    requiresAuth: true,
+    session
+  });
+
   return (
     <section className="dashboard-grid">
       <section className="panel">
@@ -787,8 +884,13 @@ function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, 
           title="Monetization posture"
           body="Subscription velocity, conversion pressure, and projected revenue are surfaced here for operator decisions."
         />
-        {loading ? <div className="panel-note">Loading revenue posture...</div> : null}
-        {error ? <div className="panel-note panel-note-error">{error}</div> : null}
+        <PanelStateNotice
+          state={state}
+          loadingLabel="Loading revenue posture..."
+          error={error}
+          emptyLabel="Revenue metrics will appear after lead capture and subscription events sync."
+          authLabel="Sign in to load your account revenue posture and premium conversion state."
+        />
         <div className={`locked-panel-shell ${locked ? "is-locked" : ""}`}>
           {revenue ? (
             <div className="revenue-grid">
@@ -857,7 +959,7 @@ function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, 
   );
 }
 
-function UpgradeModal({ open, pricing, tier, onClose, onCheckout }) {
+function UpgradeModal({ open, pricing, tier, onClose, onCheckout, session, authState }) {
   if (!open) {
     return null;
   }
@@ -888,8 +990,8 @@ function UpgradeModal({ open, pricing, tier, onClose, onCheckout }) {
               <h3>{plan.displayPrice}</h3>
               <strong>{plan.features[0]}</strong>
               <p>{plan.features.slice(1).join(" · ")}</p>
-              <button className="primary-button" type="button" onClick={() => onCheckout(plan.id)}>
-                Upgrade to {plan.name}
+              <button className="primary-button" type="button" onClick={() => onCheckout(plan.id)} disabled={!session}>
+                {session ? `Upgrade to ${plan.name}` : authState === AUTH_STATES.confirmationNeeded ? "Confirm email to upgrade" : "Sign in to upgrade"}
               </button>
             </article>
           ))}
@@ -899,21 +1001,77 @@ function UpgradeModal({ open, pricing, tier, onClose, onCheckout }) {
   );
 }
 
+function CheckoutReturnPanel({ checkoutState, onRetryCheckout, onDismiss }) {
+  if (!checkoutState) {
+    return null;
+  }
+
+  if (checkoutState === "success") {
+    return (
+      <section className="panel">
+        <SectionHeader
+          eyebrow="Checkout Success"
+          title="Billing activated"
+          body="Your Stripe checkout completed. The app is refreshing subscription access from the backend now."
+        />
+        <div className="status-row status-row-wrap">
+          <div className="status-chip">Success</div>
+          <div className="status-chip">Refreshing subscription state</div>
+        </div>
+        <div className="hero-actions">
+          <button className="primary-button" type="button" onClick={onDismiss}>
+            Continue to dashboard
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel">
+      <SectionHeader
+        eyebrow="Checkout Canceled"
+        title="No billing changes applied"
+        body="Stripe checkout was canceled before completion. Your current plan remains unchanged."
+      />
+      <div className="status-row status-row-wrap">
+        <div className="status-chip">Canceled</div>
+        <div className="status-chip">Plan unchanged</div>
+      </div>
+      <div className="hero-actions">
+        <button className="primary-button" type="button" onClick={onRetryCheckout}>
+          Try upgrade again
+        </button>
+        <button className="ghost-button" type="button" onClick={onDismiss}>
+          Stay on current plan
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function AuthPanel({
   authState,
+  authFeedbackState,
   authMode,
   email,
   password,
   authBusy,
   authError,
   authNotice,
+  signupCooldown,
+  resendCooldown,
   onModeChange,
   onEmailChange,
   onPasswordChange,
   onSubmit,
   onConfirmationRetry,
+  onResendConfirmation,
   enabled
 }) {
+  const isConfirmationState = authState === AUTH_STATES.confirmationNeeded;
+  const isSignupCoolingDown = authMode === "signup" && signupCooldown > 0;
+
   return (
     <section className="panel">
       <SectionHeader
@@ -921,7 +1079,7 @@ function AuthPanel({
         title="Supabase access"
         body={
           enabled
-            ? authState === AUTH_STATES.confirmationNeeded
+            ? isConfirmationState
               ? "Account created. Confirm your email, then return here to continue."
               : "Sign in to persist alerts, unlock subscriptions, and personalize intelligence."
             : "Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable auth."
@@ -929,8 +1087,11 @@ function AuthPanel({
       />
       <div className="status-row status-row-wrap">
         <div className="status-chip">
-          Auth state: {authState === AUTH_STATES.signedIn ? "Signed in" : authState === AUTH_STATES.confirmationNeeded ? "Email confirmation needed" : "Signed out"}
+          Auth state: {authState === AUTH_STATES.signedIn ? "Signed in" : isConfirmationState ? "Email confirmation needed" : "Signed out"}
         </div>
+        {authFeedbackState === AUTH_FEEDBACK_STATES.emailSent ? <div className="status-chip">Email sent</div> : null}
+        {isConfirmationState ? <div className="status-chip">Waiting confirmation</div> : null}
+        {authFeedbackState === AUTH_FEEDBACK_STATES.error ? <div className="status-chip">Error</div> : null}
       </div>
       <div className="auth-toggle">
         <button className={authMode === "signin" ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signin")}>
@@ -945,12 +1106,17 @@ function AuthPanel({
         <input className="auth-input" type="password" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="Password" required disabled={!enabled || authBusy} />
         {authNotice ? <p className="panel-note">{authNotice}</p> : null}
         {authError ? <p className="auth-error">{authError}</p> : null}
-        <button className="primary-button" type="submit" disabled={!enabled || authBusy}>
-          {authBusy ? "Working..." : authMode === "signin" ? "Sign In" : "Create Account"}
+        <button className="primary-button" type="submit" disabled={!enabled || authBusy || isSignupCoolingDown}>
+          {authBusy ? "Working..." : authMode === "signin" ? "Sign In" : isSignupCoolingDown ? `Create Account (${signupCooldown}s)` : "Create Account"}
         </button>
-        {authState === AUTH_STATES.confirmationNeeded ? (
+        {isConfirmationState ? (
           <button className="ghost-button" type="button" onClick={onConfirmationRetry} disabled={!enabled || authBusy}>
             I confirmed my email, continue
+          </button>
+        ) : null}
+        {isConfirmationState ? (
+          <button className="ghost-button" type="button" onClick={onResendConfirmation} disabled={!enabled || authBusy || resendCooldown > 0 || !email}>
+            {resendCooldown > 0 ? `Resend confirmation (${resendCooldown}s)` : "Resend confirmation email"}
           </button>
         ) : null}
       </form>
@@ -1042,15 +1208,16 @@ function UserPanel({ session, tier, subscription, onSignOut, historyCount }) {
   );
 }
 
-function AccountStatusPanel({ subscription }) {
+function AccountStatusPanel({ subscription, session, authState, onManageBilling }) {
   const account = normalizeSubscriptionState(subscription, subscription?.tier || "free");
+  const hasBillingRecord = Boolean(subscription?.stripeCustomerId || subscription?.stripeSubscriptionId);
 
   return (
     <section className="panel">
       <SectionHeader
         eyebrow="Account Status"
         title="Current plan state"
-        body="This panel reflects the subscription record currently loaded from the backend."
+        body="This panel reflects the auth session and the latest subscription record loaded from the backend."
       />
       <div className="user-grid">
         <article className="memory-card">
@@ -1062,6 +1229,18 @@ function AccountStatusPanel({ subscription }) {
           <strong>{getSubscriptionStatusLabel(account.status)}</strong>
           <span>Billing status</span>
           <span>{account.currentPeriodEnd ? `Ends ${formatDateTime(account.currentPeriodEnd)}` : "No active billing period"}</span>
+        </article>
+        <article className="memory-card">
+          <strong>{authState === AUTH_STATES.signedIn ? "Signed in" : authState === AUTH_STATES.confirmationNeeded ? "Confirmation needed" : "Signed out"}</strong>
+          <span>Auth state</span>
+          <span>{session?.user?.email || "Guest session"}</span>
+        </article>
+        <article className="memory-card">
+          <strong>{hasBillingRecord ? "Billing profile ready" : "Billing portal unavailable"}</strong>
+          <span>Manage billing</span>
+          <button className="ghost-button" type="button" onClick={onManageBilling} disabled>
+            Manage billing
+          </button>
         </article>
       </div>
     </section>
@@ -1146,6 +1325,9 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [authState, setAuthState] = useState(AUTH_STATES.signedOut);
+  const [authFeedbackState, setAuthFeedbackState] = useState(AUTH_FEEDBACK_STATES.idle);
+  const [signupCooldown, setSignupCooldown] = useState(0);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const [pendingCheckoutTier, setPendingCheckoutTier] = useState(() => {
     if (typeof window === "undefined") {
       return "";
@@ -1162,6 +1344,7 @@ export default function App() {
   const [checkoutNotice, setCheckoutNotice] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [checkoutState, setCheckoutState] = useState(() => getCheckoutStateFromLocation());
+  const [checkoutResultView, setCheckoutResultView] = useState(() => getCheckoutStateFromLocation());
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
@@ -1190,11 +1373,14 @@ export default function App() {
       setCheckoutNotice("Checkout completed. Subscription status is refreshing.");
       setAuthNotice("Checkout completed. Refreshing your subscription access.");
       setPendingCheckoutTier("");
+      setCheckoutResultView("success");
+      logCtaClick("checkout-success", "checkout-return", pendingCheckoutTier || tier).catch(() => null);
     }
 
     if (checkoutState === "cancel") {
       setCheckoutNotice("");
       setCheckoutError("Checkout was canceled. Your plan has not changed.");
+      setCheckoutResultView("cancel");
     }
 
     if (typeof window !== "undefined") {
@@ -1205,6 +1391,29 @@ export default function App() {
 
     setCheckoutState("");
   }, [checkoutState]);
+
+  const refreshUserAccess = async () => {
+    if (!session?.user?.id || !session?.access_token) {
+      return null;
+    }
+
+    const [serverSubscription, fallbackTier] = await Promise.all([
+      fetchSubscription(session.access_token).catch(() => null),
+      getUserTier(session.user.id).catch(() => "free")
+    ]);
+
+    const resolvedTier = serverSubscription?.tier || fallbackTier || "free";
+    const nextSubscription =
+      serverSubscription || {
+        tier: resolvedTier,
+        status: hasPaidAccess(resolvedTier) ? "active" : "free",
+        paid: hasPaidAccess(resolvedTier)
+      };
+
+    setTier(resolvedTier);
+    setSubscription(nextSubscription);
+    return nextSubscription;
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1220,9 +1429,23 @@ export default function App() {
   }, [pendingCheckoutTier]);
 
   useEffect(() => {
+    if (signupCooldown <= 0 && resendCooldown <= 0) {
+      return undefined;
+    }
+
+    const timerId = window.setInterval(() => {
+      setSignupCooldown((current) => Math.max(current - 1, 0));
+      setResendCooldown((current) => Math.max(current - 1, 0));
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, [resendCooldown, signupCooldown]);
+
+  useEffect(() => {
     if (session?.user?.id) {
       setAuthState(AUTH_STATES.signedIn);
       setAuthError("");
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
       return;
     }
 
@@ -1238,19 +1461,46 @@ export default function App() {
         return;
       }
 
-      const accessToken = session.access_token;
-      const [serverSubscription, fallbackTier] = await Promise.all([
-        fetchSubscription(accessToken).catch(() => null),
-        getUserTier(session.user.id).catch(() => "free")
-      ]);
-
-      const resolvedTier = serverSubscription?.tier || fallbackTier || "free";
-      setTier(resolvedTier);
-      setSubscription(serverSubscription || { tier: resolvedTier, status: hasPaidAccess(resolvedTier) ? "active" : "free", paid: hasPaidAccess(resolvedTier) });
+      await refreshUserAccess();
     }
 
     loadSubscriptionState();
   }, [checkoutState, session]);
+
+  useEffect(() => {
+    if (checkoutResultView !== "success" || !session?.access_token) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function syncAccessAfterCheckout() {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const nextSubscription = await refreshUserAccess();
+        if (cancelled) {
+          return;
+        }
+
+        if (nextSubscription?.paid) {
+          setCheckoutNotice("Checkout completed. Premium access is now unlocked.");
+          fetchAllData();
+          return;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      }
+
+      if (!cancelled) {
+        setCheckoutNotice("Checkout completed. Waiting for billing sync from Stripe webhook.");
+      }
+    }
+
+    syncAccessAfterCheckout();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [checkoutResultView, session?.access_token]);
 
   useEffect(() => {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -1337,7 +1587,7 @@ export default function App() {
       setPlatformDashboard(dashboardResult.payload);
       setPlatformError("");
     } else if (dashboardResult.error) {
-      setPlatformError(dashboardResult.error);
+      setPlatformError(withHealthcheckHint(dashboardResult.error));
     }
 
     setPlatformBusy(false);
@@ -1369,20 +1619,28 @@ export default function App() {
     setAuthBusy(true);
     setAuthError("");
     setAuthNotice("");
+    setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
 
     try {
       if (authMode === "signin") {
         await signIn(email, password);
         setAuthState(AUTH_STATES.signedIn);
+        await logCtaClick("signin-success", "auth-panel", tier).catch(() => null);
         setEmail("");
       } else {
         const result = await signUp(email, password);
         if (result?.session) {
           setAuthState(AUTH_STATES.signedIn);
+          setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
+          await logCtaClick("signup-success", "auth-panel", tier).catch(() => null);
           setEmail("");
         } else {
           setAuthState(AUTH_STATES.confirmationNeeded);
+          setAuthFeedbackState(AUTH_FEEDBACK_STATES.emailSent);
           setAuthMode("signin");
+          setSignupCooldown(SIGNUP_COOLDOWN_SECONDS);
+          setResendCooldown(RESEND_COOLDOWN_SECONDS);
+          await logCtaClick("signup-confirmation-sent", "auth-panel", tier).catch(() => null);
           setAuthNotice(
             pendingCheckoutTier
               ? "Check your inbox, confirm your email, then sign in. Your pending Pro or Elite checkout will resume automatically."
@@ -1392,7 +1650,19 @@ export default function App() {
       }
       setPassword("");
     } catch (error) {
-      setAuthError(toFriendlyAuthError(error, authMode));
+      const authFailure = classifyAuthError(error, authMode);
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.error);
+      setAuthError(authFailure.message);
+
+      if (authFailure.kind === "rate-limit" && authMode === "signup") {
+        setSignupCooldown(RESEND_COOLDOWN_SECONDS);
+        setResendCooldown(RESEND_COOLDOWN_SECONDS);
+      }
+
+      if (authFailure.kind === "email-not-confirmed") {
+        setAuthState(AUTH_STATES.confirmationNeeded);
+        setAuthFeedbackState(AUTH_FEEDBACK_STATES.waitingConfirmation);
+      }
     } finally {
       setAuthBusy(false);
     }
@@ -1403,7 +1673,8 @@ export default function App() {
     setCheckoutError("");
 
     try {
-      await logCtaClick(`checkout-${requestedTier}`, "upgrade-modal", tier);
+      await logCtaClick(`upgrade-click-${requestedTier}`, "upgrade-modal", tier).catch(() => null);
+      await logCtaClick(`checkout-start-${requestedTier}`, "upgrade-modal", tier);
       if (!session?.access_token) {
         setPendingCheckoutTier(requestedTier);
         setAuthMode("signin");
@@ -1423,7 +1694,7 @@ export default function App() {
       setAuthNotice(options.autoRetry ? "Checkout ready. Redirecting now." : "");
       window.location.href = payload.url;
     } catch (error) {
-      setCheckoutError(String(error?.message || error));
+      setCheckoutError(withHealthcheckHint(String(error?.message || error)));
       if (options.autoRetry) {
         checkoutRetryRef.current = false;
         throw error;
@@ -1451,6 +1722,7 @@ export default function App() {
   const handleConfirmationRetry = async () => {
     setAuthBusy(true);
     setAuthError("");
+    setAuthFeedbackState(AUTH_FEEDBACK_STATES.waitingConfirmation);
 
     try {
       const nextSession = await getCurrentSession();
@@ -1459,13 +1731,44 @@ export default function App() {
       if (nextSession?.access_token) {
         setAuthState(AUTH_STATES.signedIn);
         setAuthNotice(pendingCheckoutTier ? "Email confirmed. Continuing to checkout." : "Email confirmed. You are signed in.");
+        setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
         return;
       }
 
       setAuthMode("signin");
       setAuthNotice("Email confirmed. Sign in to continue.");
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.waitingConfirmation);
     } catch (error) {
-      setAuthError(toFriendlyAuthError(error, "signin"));
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.error);
+      setAuthError(classifyAuthError(error, "signin").message);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    if (!email || resendCooldown > 0) {
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      const redirectTo = typeof window !== "undefined" ? window.location.origin + window.location.pathname : undefined;
+      await resendConfirmationEmail(email, redirectTo);
+      setAuthState(AUTH_STATES.confirmationNeeded);
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.emailSent);
+      setResendCooldown(RESEND_COOLDOWN_SECONDS);
+      setAuthNotice("Confirmation email sent. Check your inbox, then sign in after you confirm.");
+    } catch (error) {
+      const authFailure = classifyAuthError(error, "signup");
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.error);
+      setAuthError(authFailure.message);
+      if (authFailure.kind === "rate-limit") {
+        setResendCooldown(RESEND_COOLDOWN_SECONDS);
+      }
     } finally {
       setAuthBusy(false);
     }
@@ -1481,7 +1784,7 @@ export default function App() {
       setLeadStatus("You are on the list. Your 3 free intelligence signals will arrive daily.");
       setLeadEmail("");
     } catch (error) {
-      setLeadStatus(String(error?.message || error));
+      setLeadStatus(withHealthcheckHint(String(error?.message || error)));
     } finally {
       setLeadBusy(false);
     }
@@ -1504,6 +1807,19 @@ export default function App() {
 
   const handleUnlockPro = async () => {
     await logCtaClick("unlock-pro", "conversion-banner", tier).catch(() => null);
+    setIsUpgradeModalOpen(true);
+  };
+
+  const handleManageBilling = () => {
+    setCheckoutNotice("Billing portal is not enabled yet. Add a Stripe customer portal endpoint to activate this control.");
+  };
+
+  const handleDismissCheckoutResult = () => {
+    setCheckoutResultView("");
+  };
+
+  const handleRetryUpgrade = () => {
+    setCheckoutResultView("");
     setIsUpgradeModalOpen(true);
   };
 
@@ -1603,9 +1919,24 @@ export default function App() {
         tier={effectiveSubscription.tier}
         onClose={() => setIsUpgradeModalOpen(false)}
         onCheckout={handleCheckout}
+        session={session}
+        authState={authState}
+      />
+      <CheckoutReturnPanel
+        checkoutState={checkoutResultView}
+        onRetryCheckout={handleRetryUpgrade}
+        onDismiss={handleDismissCheckoutResult}
       />
       {checkoutNotice ? <div className="panel-note">{checkoutNotice}</div> : null}
       {checkoutError ? <div className="panel-note panel-note-error">{checkoutError}</div> : null}
+      {platformError ? (
+        <div className="panel-note panel-note-error">
+          Backend health check:{" "}
+          <a href={BACKEND_HEALTHCHECK_URL} rel="noreferrer" target="_blank">
+            {BACKEND_HEALTHCHECK_URL}
+          </a>
+        </div>
+      ) : null}
       <section className="hero-panel">
         <div className="hero-copy">
           <p className="eyebrow">{THEME} Monetized Intelligence Platform</p>
@@ -1683,17 +2014,21 @@ export default function App() {
         {!session ? (
           <AuthPanel
             authState={authState}
+            authFeedbackState={authFeedbackState}
             authMode={authMode}
             email={email}
             password={password}
             authBusy={authBusy}
             authError={authError}
             authNotice={authNotice}
+            signupCooldown={signupCooldown}
+            resendCooldown={resendCooldown}
             onModeChange={setAuthMode}
             onEmailChange={setEmail}
             onPasswordChange={setPassword}
             onSubmit={handleAuthSubmit}
             onConfirmationRetry={handleConfirmationRetry}
+            onResendConfirmation={handleResendConfirmation}
             enabled={isSupabaseEnabled}
           />
         ) : (
@@ -1705,7 +2040,7 @@ export default function App() {
             historyCount={intelligence.history.length}
           />
         )}
-        <AccountStatusPanel subscription={effectiveSubscription} />
+        <AccountStatusPanel subscription={subscription || effectiveSubscription} session={session} authState={authState} onManageBilling={handleManageBilling} />
         <SubscriptionPanel pricing={pricingTiers} tier={effectiveSubscription.tier} subscription={subscription} onCheckout={handleCheckout} session={session} authState={authState} />
       </section>
 
@@ -1730,6 +2065,7 @@ export default function App() {
         loading={platformBusy}
         error={platformError}
         locked={isFreeTier}
+        session={session}
       />
 
       <section className="dashboard-grid">
@@ -1739,6 +2075,7 @@ export default function App() {
           error={platformError}
           locked={isFreeTier}
           onUnlock={() => setIsUpgradeModalOpen(true)}
+          session={session}
         />
         <AgentSuitePanel
           agents={platformDashboard.agents}
@@ -1747,6 +2084,7 @@ export default function App() {
           loading={platformBusy}
           error={platformError}
           locked={isFreeTier}
+          session={session}
         />
       </section>
 

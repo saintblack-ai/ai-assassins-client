@@ -1,6 +1,42 @@
 import { isSupabaseEnabled, supabase } from "./supabase";
 
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_URL || (import.meta.env.PROD ? "" : "http://localhost:5000")).replace(/\/+$/, "");
+function resolveApiBaseUrl() {
+  const configured = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+
+  if (import.meta.env.PROD) {
+    return configured;
+  }
+
+  return configured || "http://localhost:5000";
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
+
+function logPlatformEvent(level, event, context = {}) {
+  console[level](`[platform:${event}]`, context);
+}
+
+function toFriendlyApiError(path, error) {
+  const message = String(error?.message || error || "Request failed");
+
+  if (path === "/api/stripe/checkout") {
+    return new Error("Checkout is temporarily unavailable. Verify billing configuration and try again.");
+  }
+
+  if (path === "/api/leads") {
+    return new Error("Lead capture is temporarily unavailable. Check backend health and try again.");
+  }
+
+  if (path === "/api/platform/dashboard") {
+    return new Error("Dashboard data is temporarily unavailable. Check backend health and try again.");
+  }
+
+  return new Error(message);
+}
+
+export function getBackendHealthcheckUrl() {
+  return `${API_BASE_URL || ""}/api/health`;
+}
 
 export function hasPaidAccess(tier) {
   return tier === "pro" || tier === "elite";
@@ -51,6 +87,24 @@ export async function signUp(email, password) {
   return data;
 }
 
+export async function resendConfirmationEmail(email, redirectTo) {
+  if (!supabase) {
+    throw new Error("Supabase auth is not configured");
+  }
+
+  const { data, error } = await supabase.auth.resend({
+    type: "signup",
+    email,
+    options: redirectTo ? { emailRedirectTo: redirectTo } : undefined
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function signOut() {
   if (!supabase) {
     return;
@@ -86,21 +140,41 @@ export async function getUserTier(userId) {
 }
 
 async function apiFetch(path, accessToken, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(options.headers || {})
+  const url = `${API_BASE_URL}${path}`;
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(options.headers || {})
+      }
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      logPlatformEvent("error", "api-response", {
+        path,
+        status: response.status,
+        error: payload?.error || `request_failed_${response.status}`
+      });
+      throw new Error(payload?.error || `request_failed_${response.status}`);
     }
-  });
 
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || `request_failed_${response.status}`);
+    if (path === "/api/stripe/checkout" || path === "/api/leads" || path === "/api/platform/dashboard") {
+      logPlatformEvent("info", "api-success", { path, status: response.status });
+    }
+
+    return payload;
+  } catch (error) {
+    logPlatformEvent("error", "api-fetch", {
+      path,
+      url,
+      message: String(error?.message || error)
+    });
+    throw toFriendlyApiError(path, error);
   }
-
-  return payload;
 }
 
 export async function fetchUserAlerts(accessToken) {
@@ -147,7 +221,7 @@ export async function logCtaClick(cta, location, tier = "free") {
   });
 }
 
-export function toFriendlyAuthError(error, mode = "signin") {
+export function classifyAuthError(error, mode = "signin") {
   const message = String(error?.message || error || "Authentication failed");
   const lowered = message.toLowerCase();
 
@@ -157,18 +231,46 @@ export function toFriendlyAuthError(error, mode = "signin") {
     lowered.includes("security purposes") ||
     lowered.includes("over_email_send_rate_limit")
   ) {
-    return mode === "signup"
-      ? "Too many sign-up or confirmation email attempts. Wait a minute, then try again or check the last confirmation email you already received."
-      : "Too many sign-in attempts. Wait a minute, then try again.";
+    return {
+      kind: "rate-limit",
+      message:
+        mode === "signup"
+          ? "Too many sign-up or confirmation email attempts. Wait a minute, then try again or check the last confirmation email you already received."
+          : "Too many sign-in attempts. Wait a minute, then try again."
+    };
   }
 
   if (lowered.includes("email not confirmed") || lowered.includes("email_not_confirmed")) {
-    return "Check your inbox and confirm your email before signing in.";
+    return {
+      kind: "email-not-confirmed",
+      message: "Check your inbox and confirm your email before signing in."
+    };
   }
 
   if (lowered.includes("invalid login credentials")) {
-    return "Email or password is incorrect.";
+    return {
+      kind: "invalid-credentials",
+      message: "Email or password is incorrect."
+    };
   }
 
-  return message;
+  if (
+    lowered.includes("invalid email") ||
+    lowered.includes("email address") ||
+    lowered.includes("unable to validate email address")
+  ) {
+    return {
+      kind: "invalid-email",
+      message: "Enter a valid email address and try again."
+    };
+  }
+
+  return {
+    kind: "unknown",
+    message
+  };
+}
+
+export function toFriendlyAuthError(error, mode = "signin") {
+  return classifyAuthError(error, mode).message;
 }
