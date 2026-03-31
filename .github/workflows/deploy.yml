@@ -119,7 +119,7 @@ jobs:
             BACKEND_URL="$(printf '%s' "${PUBLIC_BACKEND_URL}" | sed 's#/*$##')"
             BACKEND_HEALTH_URL="${BACKEND_URL}/api/health"
           fi
-
+BACKEND_HEALTH_URL="${VITE_BACKEND_URL}/api/health"
           echo "frontend_url=${FRONTEND_URL}" >> "$GITHUB_OUTPUT"
           echo "backend_enabled=${BACKEND_ENABLED}" >> "$GITHUB_OUTPUT"
           echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "$GITHUB_OUTPUT"
