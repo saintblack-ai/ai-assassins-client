@@ -7,6 +7,7 @@ import {
   classifyAuthError,
   captureLead,
   clearUserAlerts,
+  createBillingPortalSession,
   fetchPlatformDashboard,
   fetchSubscription,
   fetchUserAlerts,
@@ -15,11 +16,15 @@ import {
   getUserTier,
   hasPaidAccess,
   logCtaClick,
+  requestPasswordReset,
   resendConfirmationEmail,
   signIn,
   signOut,
   signUp,
-  subscribeToAuthChanges
+  shouldPreferSignInForSignup,
+  subscribeToAuthChanges,
+  trackRevenueEvent,
+  updatePassword
 } from "./lib/platform";
 import "./app.css";
 
@@ -32,7 +37,8 @@ const REFRESH_INTERVAL_MS = 60000;
 const AUTH_STATES = {
   signedOut: "signed-out",
   signedIn: "signed-in",
-  confirmationNeeded: "email-confirmation-needed"
+  confirmationNeeded: "email-confirmation-needed",
+  passwordRecovery: "password-recovery"
 };
 const AUTH_FEEDBACK_STATES = {
   idle: "idle",
@@ -43,6 +49,20 @@ const AUTH_FEEDBACK_STATES = {
 const SIGNUP_COOLDOWN_SECONDS = 15;
 const RESEND_COOLDOWN_SECONDS = 60;
 const BACKEND_HEALTHCHECK_URL = getBackendHealthcheckUrl();
+const CHECKOUT_SYNC_DELAYS_MS = [0, 1500, 2500, 4000, 6000, 9000];
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function urlIncludesRecoveryToken() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const combined = `${window.location.search}${window.location.hash}`.toLowerCase();
+  return combined.includes("type=recovery");
+}
 
 const CONTENT_PILLARS = [
   {
@@ -321,11 +341,34 @@ function formatDateTime(value) {
 }
 
 function normalizeSubscriptionState(subscription, tier) {
+  const normalizedTier = firstDefined(subscription?.tier, subscription?.planTier, subscription?.plan_tier, tier, "free");
+  const normalizedStatus = firstDefined(
+    subscription?.status,
+    subscription?.subscriptionStatus,
+    subscription?.subscription_status,
+    hasPaidAccess(normalizedTier) ? "active" : "free"
+  );
+  const stripeCustomerId = firstDefined(subscription?.stripeCustomerId, subscription?.stripe_customer_id, null);
+  const stripeSubscriptionId = firstDefined(subscription?.stripeSubscriptionId, subscription?.stripe_subscription_id, null);
+  const portalUrl = firstDefined(subscription?.portalUrl, subscription?.billingPortalUrl, subscription?.billing_portal_url, null);
+  const billingState = firstDefined(
+    subscription?.billingState,
+    subscription?.billing_state,
+    stripeCustomerId || stripeSubscriptionId ? "configured" : "not-configured"
+  );
+
   return {
-    tier: subscription?.tier || tier || "free",
-    status: subscription?.status || (hasPaidAccess(subscription?.tier || tier) ? "active" : "free"),
-    paid: Boolean(subscription?.paid ?? hasPaidAccess(subscription?.tier || tier)),
-    currentPeriodEnd: subscription?.currentPeriodEnd || null
+    tier: normalizedTier,
+    status: normalizedStatus,
+    paid: Boolean(firstDefined(subscription?.paid, subscription?.isPaid, hasPaidAccess(normalizedTier))),
+    currentPeriodEnd: firstDefined(subscription?.currentPeriodEnd, subscription?.current_period_end, null),
+    cancelAtPeriodEnd: Boolean(firstDefined(subscription?.cancelAtPeriodEnd, subscription?.cancel_at_period_end, false)),
+    stripeCustomerId,
+    stripeSubscriptionId,
+    portalUrl,
+    billingState,
+    billingPortalReady: Boolean(portalUrl || stripeCustomerId || stripeSubscriptionId),
+    lastSyncedAt: firstDefined(subscription?.lastSyncedAt, subscription?.updatedAt, subscription?.updated_at, null)
   };
 }
 
@@ -393,6 +436,38 @@ function getSubscriptionStatusLabel(status) {
     return "Canceled";
   }
   return "Free";
+}
+
+function getAuthStateLabel(authState) {
+  if (authState === AUTH_STATES.signedIn) {
+    return "Signed in";
+  }
+  if (authState === AUTH_STATES.confirmationNeeded) {
+    return "Confirmation needed";
+  }
+  if (authState === AUTH_STATES.passwordRecovery) {
+    return "Password recovery";
+  }
+  return "Signed out";
+}
+
+function getBillingStateLabel(account) {
+  if (account.portalUrl) {
+    return "Portal ready";
+  }
+  if (account.cancelAtPeriodEnd) {
+    return "Cancels at period end";
+  }
+  if (account.billingState === "configured") {
+    return "Billing configured";
+  }
+  if (account.billingState === "past_due") {
+    return "Billing action required";
+  }
+  if (account.billingState === "not-configured") {
+    return "No billing profile";
+  }
+  return account.billingState || "Unknown";
 }
 
 function getPanelState({ loading, error, items, requiresAuth, session }) {
@@ -728,29 +803,29 @@ function LockedPanelOverlay({ onUnlock }) {
 }
 
 function SocialProofPanel({ analytics, revenue }) {
-  const activeUsers = Number(analytics?.leadSubmissions || 0) + 27;
-  const runningAgents = Math.max(18, Number(revenue?.activeSubscribers || 0) % 12 + 18);
-  const liveActivity = Number(analytics?.ctaClicks || 0) + 84;
+  const activeSubscribers = Number(revenue?.activeSubscribers || 0);
+  const leadSubmissions = Number(analytics?.leadSubmissions || 0);
+  const upgradeIntent = Number(analytics?.ctaClicks || 0);
 
   return (
     <section className="panel">
       <SectionHeader
-        eyebrow="Social Proof"
+        eyebrow="Live Conversion Signals"
         title="System momentum"
-        body="Visible activity increases confidence and creates immediate urgency around upgrade intent."
+        body="These counters are sourced from the live platform payload instead of fixed social proof placeholders."
       />
       <div className="proof-grid">
         <article className="proof-card">
-          <strong>{activeUsers}</strong>
-          <span>Users analyzing signals now</span>
+          <strong>{activeSubscribers.toLocaleString()}</strong>
+          <span>Active paying subscribers</span>
         </article>
         <article className="proof-card">
-          <strong>{runningAgents}</strong>
-          <span>Agents running continuously</span>
+          <strong>{leadSubmissions.toLocaleString()}</strong>
+          <span>Captured leads</span>
         </article>
         <article className="proof-card">
-          <strong>{liveActivity}</strong>
-          <span>Live system activity</span>
+          <strong>{upgradeIntent.toLocaleString()}</strong>
+          <span>Upgrade-intent clicks</span>
         </article>
       </div>
     </section>
@@ -771,7 +846,7 @@ function ActivityFeedPanel({ feed, loading, error, locked, onUnlock, session }) 
       <SectionHeader
         eyebrow="Live Activity Feed"
         title="Operational activity stream"
-        body="Realtime platform actions from the internal agent layer. Simulated where external signals are unavailable."
+        body="Realtime platform actions from the backend activity stream."
       />
       <PanelStateNotice
         state={state}
@@ -872,7 +947,7 @@ function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, 
     loading,
     error,
     items: revenue ? [revenue] : [],
-    requiresAuth: true,
+    requiresAuth: false,
     session
   });
 
@@ -897,7 +972,7 @@ function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, 
               <MetricCard
                 label="MRR"
                 value={`$${Number(revenue.monthlyRecurringRevenue || 0).toLocaleString()}`}
-                detail="Estimated recurring revenue"
+                detail="Live recurring revenue from the dashboard payload"
               />
               <MetricCard
                 label="Subscribers"
@@ -917,7 +992,7 @@ function RevenueCommandPanel({ revenue, analytics, briefing, premium, onUnlock, 
               <MetricCard
                 label="CTA Clicks"
                 value={Number(analytics?.ctaClicks || 0).toLocaleString()}
-                detail="Simulated upgrade intent"
+                detail="Tracked upgrade intent"
               />
             </div>
           ) : (
@@ -1001,7 +1076,7 @@ function UpgradeModal({ open, pricing, tier, onClose, onCheckout, session, authS
   );
 }
 
-function CheckoutReturnPanel({ checkoutState, onRetryCheckout, onDismiss }) {
+function CheckoutReturnPanel({ checkoutState, onRetryCheckout, onRetrySync, onDismiss, subscriptionRefreshState, subscriptionRefreshAttempt }) {
   if (!checkoutState) {
     return null;
   }
@@ -1016,9 +1091,18 @@ function CheckoutReturnPanel({ checkoutState, onRetryCheckout, onDismiss }) {
         />
         <div className="status-row status-row-wrap">
           <div className="status-chip">Success</div>
-          <div className="status-chip">Refreshing subscription state</div>
+          <div className="status-chip">
+            {subscriptionRefreshState === "synced" ? "Premium access unlocked" : "Refreshing subscription state"}
+          </div>
+          {subscriptionRefreshAttempt > 0 ? <div className="status-chip">Attempt {subscriptionRefreshAttempt}</div> : null}
+          {subscriptionRefreshState === "pending" ? <div className="status-chip">Waiting for webhook reconciliation</div> : null}
         </div>
         <div className="hero-actions">
+          {subscriptionRefreshState !== "synced" ? (
+            <button className="ghost-button" type="button" onClick={onRetrySync}>
+              Retry subscription refresh
+            </button>
+          ) : null}
           <button className="primary-button" type="button" onClick={onDismiss}>
             Continue to dashboard
           </button>
@@ -1056,6 +1140,8 @@ function AuthPanel({
   authMode,
   email,
   password,
+  recoveryPassword,
+  recoveryPasswordConfirm,
   authBusy,
   authError,
   authNotice,
@@ -1064,12 +1150,16 @@ function AuthPanel({
   onModeChange,
   onEmailChange,
   onPasswordChange,
+  onRecoveryPasswordChange,
+  onRecoveryPasswordConfirmChange,
   onSubmit,
+  onForgotPassword,
   onConfirmationRetry,
   onResendConfirmation,
   enabled
 }) {
   const isConfirmationState = authState === AUTH_STATES.confirmationNeeded;
+  const isRecoveryState = authState === AUTH_STATES.passwordRecovery || authMode === "recovery";
   const isSignupCoolingDown = authMode === "signup" && signupCooldown > 0;
 
   return (
@@ -1081,33 +1171,88 @@ function AuthPanel({
           enabled
             ? isConfirmationState
               ? "Account created. Confirm your email, then return here to continue."
+              : isRecoveryState
+                ? "Reset your password here, then return to the normal sign-in flow."
               : "Sign in to persist alerts, unlock subscriptions, and personalize intelligence."
             : "Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable auth."
         }
       />
       <div className="status-row status-row-wrap">
         <div className="status-chip">
-          Auth state: {authState === AUTH_STATES.signedIn ? "Signed in" : isConfirmationState ? "Email confirmation needed" : "Signed out"}
+          Auth state: {authState === AUTH_STATES.signedIn ? "Signed in" : isConfirmationState ? "Email confirmation needed" : isRecoveryState ? "Password reset" : "Signed out"}
         </div>
         {authFeedbackState === AUTH_FEEDBACK_STATES.emailSent ? <div className="status-chip">Email sent</div> : null}
         {isConfirmationState ? <div className="status-chip">Waiting confirmation</div> : null}
+        {isRecoveryState ? <div className="status-chip">Recovery active</div> : null}
         {authFeedbackState === AUTH_FEEDBACK_STATES.error ? <div className="status-chip">Error</div> : null}
       </div>
-      <div className="auth-toggle">
-        <button className={authMode === "signin" ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signin")}>
-          Sign In
-        </button>
-        <button className={authMode === "signup" ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signup")}>
-          Create Account
-        </button>
+      <div className="auth-choice-grid">
+        <article className={`auth-choice-card ${authMode === "signin" && !isRecoveryState ? "is-selected" : ""}`}>
+          <div className="auth-choice-copy">
+            <p className="eyebrow">Returning user</p>
+            <h3>Sign In</h3>
+            <p>Use your existing account to unlock saved alerts, paid access, and checkout recovery.</p>
+          </div>
+          <div className="auth-choice-actions">
+            <button className={authMode === "signin" && !isRecoveryState ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signin")}>
+              Use Sign In
+            </button>
+            <button className="text-button" type="button" onClick={onForgotPassword} disabled={!enabled || authBusy}>
+              Forgot password?
+            </button>
+          </div>
+        </article>
+        <article className={`auth-choice-card ${authMode === "signup" ? "is-selected" : ""}`}>
+          <div className="auth-choice-copy">
+            <p className="eyebrow">New user</p>
+            <h3>Create Account</h3>
+            <p>Create a separate account flow for first-time access and email confirmation.</p>
+          </div>
+          <div className="auth-choice-actions">
+            <button className={authMode === "signup" ? "primary-button" : "ghost-button"} type="button" onClick={() => onModeChange("signup")}>
+              Use Create Account
+            </button>
+          </div>
+        </article>
       </div>
       <form className="auth-form" onSubmit={onSubmit}>
         <input className="auth-input" type="email" value={email} onChange={(event) => onEmailChange(event.target.value)} placeholder="Email" required disabled={!enabled || authBusy} />
-        <input className="auth-input" type="password" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="Password" required disabled={!enabled || authBusy} />
+        {isRecoveryState ? (
+          <>
+            <input
+              className="auth-input"
+              type="password"
+              value={recoveryPassword}
+              onChange={(event) => onRecoveryPasswordChange(event.target.value)}
+              placeholder="New password"
+              required
+              disabled={!enabled || authBusy}
+            />
+            <input
+              className="auth-input"
+              type="password"
+              value={recoveryPasswordConfirm}
+              onChange={(event) => onRecoveryPasswordConfirmChange(event.target.value)}
+              placeholder="Confirm new password"
+              required
+              disabled={!enabled || authBusy}
+            />
+          </>
+        ) : (
+          <input className="auth-input" type="password" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="Password" required disabled={!enabled || authBusy} />
+        )}
         {authNotice ? <p className="panel-note">{authNotice}</p> : null}
         {authError ? <p className="auth-error">{authError}</p> : null}
         <button className="primary-button" type="submit" disabled={!enabled || authBusy || isSignupCoolingDown}>
-          {authBusy ? "Working..." : authMode === "signin" ? "Sign In" : isSignupCoolingDown ? `Create Account (${signupCooldown}s)` : "Create Account"}
+          {authBusy
+            ? "Working..."
+            : isRecoveryState
+              ? "Save New Password"
+              : authMode === "signin"
+                ? "Sign In"
+                : isSignupCoolingDown
+                  ? `Create Account (${signupCooldown}s)`
+                  : "Create Account"}
         </button>
         {isConfirmationState ? (
           <button className="ghost-button" type="button" onClick={onConfirmationRetry} disabled={!enabled || authBusy}>
@@ -1208,9 +1353,11 @@ function UserPanel({ session, tier, subscription, onSignOut, historyCount }) {
   );
 }
 
-function AccountStatusPanel({ subscription, session, authState, onManageBilling }) {
+function AccountStatusPanel({ subscription, session, authState, onManageBilling, billingPortalBusy, subscriptionRefreshState, subscriptionRefreshAttempt }) {
   const account = normalizeSubscriptionState(subscription, subscription?.tier || "free");
-  const hasBillingRecord = Boolean(subscription?.stripeCustomerId || subscription?.stripeSubscriptionId);
+  const hasBillingRecord = Boolean(account.stripeCustomerId || account.stripeSubscriptionId);
+  const authStateLabel = getAuthStateLabel(authState);
+  const billingStateLabel = getBillingStateLabel(account);
 
   return (
     <section className="panel">
@@ -1219,6 +1366,13 @@ function AccountStatusPanel({ subscription, session, authState, onManageBilling 
         title="Current plan state"
         body="This panel reflects the auth session and the latest subscription record loaded from the backend."
       />
+      <div className="status-row status-row-wrap">
+        <div className="status-chip">Plan: {account.tier.toUpperCase()}</div>
+        <div className="status-chip">Subscription: {getSubscriptionStatusLabel(account.status)}</div>
+        <div className="status-chip">Auth: {authStateLabel}</div>
+        <div className="status-chip">Billing: {billingStateLabel}</div>
+        {subscriptionRefreshState === "refreshing" ? <div className="status-chip">Sync attempt {subscriptionRefreshAttempt}</div> : null}
+      </div>
       <div className="user-grid">
         <article className="memory-card">
           <strong>{account.tier.toUpperCase()}</strong>
@@ -1231,15 +1385,15 @@ function AccountStatusPanel({ subscription, session, authState, onManageBilling 
           <span>{account.currentPeriodEnd ? `Ends ${formatDateTime(account.currentPeriodEnd)}` : "No active billing period"}</span>
         </article>
         <article className="memory-card">
-          <strong>{authState === AUTH_STATES.signedIn ? "Signed in" : authState === AUTH_STATES.confirmationNeeded ? "Confirmation needed" : "Signed out"}</strong>
+          <strong>{authStateLabel}</strong>
           <span>Auth state</span>
           <span>{session?.user?.email || "Guest session"}</span>
         </article>
         <article className="memory-card">
-          <strong>{hasBillingRecord ? "Billing profile ready" : "Billing portal unavailable"}</strong>
-          <span>Manage billing</span>
-          <button className="ghost-button" type="button" onClick={onManageBilling} disabled>
-            Manage billing
+          <strong>{billingStateLabel}</strong>
+          <span>{hasBillingRecord ? "Billing profile found" : "No Stripe customer or subscription record returned yet"}</span>
+          <button className="ghost-button" type="button" onClick={onManageBilling} disabled={!session || billingPortalBusy}>
+            {billingPortalBusy ? "Opening billing..." : "Manage billing"}
           </button>
         </article>
       </div>
@@ -1321,6 +1475,8 @@ export default function App() {
   const [authMode, setAuthMode] = useState("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [recoveryPassword, setRecoveryPassword] = useState("");
+  const [recoveryPasswordConfirm, setRecoveryPasswordConfirm] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
@@ -1345,6 +1501,10 @@ export default function App() {
   const [checkoutError, setCheckoutError] = useState("");
   const [checkoutState, setCheckoutState] = useState(() => getCheckoutStateFromLocation());
   const [checkoutResultView, setCheckoutResultView] = useState(() => getCheckoutStateFromLocation());
+  const [checkoutSyncState, setCheckoutSyncState] = useState("idle");
+  const [checkoutSyncAttempt, setCheckoutSyncAttempt] = useState(0);
+  const [checkoutSyncKey, setCheckoutSyncKey] = useState(0);
+  const [billingPortalBusy, setBillingPortalBusy] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [activeDate, setActiveDate] = useState(() => loadSystemState().calendar[0].date);
   const notifiedRef = useRef(new Set());
@@ -1353,6 +1513,7 @@ export default function App() {
   const effectiveSubscription = normalizeSubscriptionState(subscription, tier);
   const isFreeTier = !effectiveSubscription.paid;
   const pricingTiers = platformDashboard.pricing?.length ? platformDashboard.pricing : PRICING_TIERS;
+  const showAuthPanel = !session || authState === AUTH_STATES.passwordRecovery;
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(system));
@@ -1360,7 +1521,22 @@ export default function App() {
 
   useEffect(() => {
     getCurrentSession().then(setSession);
-    const authListener = subscribeToAuthChanges((nextSession) => setSession(nextSession));
+    if (urlIncludesRecoveryToken()) {
+      setAuthState(AUTH_STATES.passwordRecovery);
+      setAuthMode("recovery");
+      setAuthNotice("Recovery link detected. Set a new password to finish resetting access.");
+    }
+
+    const authListener = subscribeToAuthChanges((event, nextSession) => {
+      setSession(nextSession);
+
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthState(AUTH_STATES.passwordRecovery);
+        setAuthMode("recovery");
+        setAuthError("");
+        setAuthNotice("Recovery verified. Set a new password, then sign back in.");
+      }
+    });
     return () => authListener.data.subscription.unsubscribe();
   }, []);
 
@@ -1374,13 +1550,29 @@ export default function App() {
       setAuthNotice("Checkout completed. Refreshing your subscription access.");
       setPendingCheckoutTier("");
       setCheckoutResultView("success");
-      logCtaClick("checkout-success", "checkout-return", pendingCheckoutTier || tier).catch(() => null);
+      setCheckoutSyncState("refreshing");
+      setCheckoutSyncAttempt(0);
+      setCheckoutSyncKey((current) => current + 1);
+      trackRevenueEvent("checkout_success", {
+        location: "checkout-return",
+        tier,
+        requestedTier: pendingCheckoutTier || tier,
+        authState
+      }).catch(() => null);
     }
 
     if (checkoutState === "cancel") {
       setCheckoutNotice("");
       setCheckoutError("Checkout was canceled. Your plan has not changed.");
       setCheckoutResultView("cancel");
+      setCheckoutSyncState("idle");
+      setCheckoutSyncAttempt(0);
+      trackRevenueEvent("checkout_cancel", {
+        location: "checkout-return",
+        tier,
+        requestedTier: pendingCheckoutTier || tier,
+        authState
+      }).catch(() => null);
     }
 
     if (typeof window !== "undefined") {
@@ -1390,7 +1582,7 @@ export default function App() {
     }
 
     setCheckoutState("");
-  }, [checkoutState]);
+  }, [authState, checkoutState, pendingCheckoutTier, tier]);
 
   const refreshUserAccess = async () => {
     if (!session?.user?.id || !session?.access_token) {
@@ -1402,9 +1594,10 @@ export default function App() {
       getUserTier(session.user.id).catch(() => "free")
     ]);
 
-    const resolvedTier = serverSubscription?.tier || fallbackTier || "free";
+    const normalizedServerSubscription = serverSubscription ? normalizeSubscriptionState(serverSubscription, fallbackTier) : null;
+    const resolvedTier = normalizedServerSubscription?.tier || fallbackTier || "free";
     const nextSubscription =
-      serverSubscription || {
+      normalizedServerSubscription || {
         tier: resolvedTier,
         status: hasPaidAccess(resolvedTier) ? "active" : "free",
         paid: hasPaidAccess(resolvedTier)
@@ -1443,13 +1636,13 @@ export default function App() {
 
   useEffect(() => {
     if (session?.user?.id) {
-      setAuthState(AUTH_STATES.signedIn);
+      setAuthState((current) => (current === AUTH_STATES.passwordRecovery ? current : AUTH_STATES.signedIn));
       setAuthError("");
       setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
       return;
     }
 
-    setAuthState((current) => (current === AUTH_STATES.confirmationNeeded ? current : AUTH_STATES.signedOut));
+    setAuthState((current) => (current === AUTH_STATES.confirmationNeeded || current === AUTH_STATES.passwordRecovery ? current : AUTH_STATES.signedOut));
   }, [session?.user?.id]);
 
   useEffect(() => {
@@ -1457,6 +1650,8 @@ export default function App() {
       if (!session?.user?.id) {
         setTier("free");
         setSubscription(null);
+        setCheckoutSyncState("idle");
+        setCheckoutSyncAttempt(0);
         setIntelligence((current) => ({ ...current, history: [] }));
         return;
       }
@@ -1468,30 +1663,41 @@ export default function App() {
   }, [checkoutState, session]);
 
   useEffect(() => {
-    if (checkoutResultView !== "success" || !session?.access_token) {
+    if (checkoutResultView !== "success" || !session?.access_token || checkoutSyncKey === 0) {
       return;
     }
 
     let cancelled = false;
 
     async function syncAccessAfterCheckout() {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      setCheckoutSyncState("refreshing");
+
+      for (let attempt = 0; attempt < CHECKOUT_SYNC_DELAYS_MS.length; attempt += 1) {
+        setCheckoutSyncAttempt(attempt + 1);
+
+        if (CHECKOUT_SYNC_DELAYS_MS[attempt] > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, CHECKOUT_SYNC_DELAYS_MS[attempt]));
+        }
+
         const nextSubscription = await refreshUserAccess();
         if (cancelled) {
           return;
         }
 
         if (nextSubscription?.paid) {
+          setCheckoutSyncState("synced");
           setCheckoutNotice("Checkout completed. Premium access is now unlocked.");
-          fetchAllData();
+          await fetchAllData(nextSubscription.tier);
           return;
         }
 
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        setCheckoutSyncState("pending");
+        setCheckoutNotice(`Checkout completed. Waiting for billing sync from Stripe webhook. Attempt ${attempt + 1} of ${CHECKOUT_SYNC_DELAYS_MS.length}.`);
       }
 
       if (!cancelled) {
-        setCheckoutNotice("Checkout completed. Waiting for billing sync from Stripe webhook.");
+        setCheckoutSyncState("pending");
+        setCheckoutNotice("Checkout completed. Payment returned successfully, but subscription reconciliation is still pending.");
       }
     }
 
@@ -1500,7 +1706,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [checkoutResultView, session?.access_token]);
+  }, [checkoutResultView, checkoutSyncKey, session?.access_token]);
 
   useEffect(() => {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -1552,7 +1758,7 @@ export default function App() {
     [postsForDate]
   );
 
-  const fetchAllData = async () => {
+  const fetchAllData = async (tierOverride) => {
     setIntelligence((current) => ({
       ...current,
       isRefreshing: true,
@@ -1565,9 +1771,10 @@ export default function App() {
 
     const accessToken = session?.access_token || null;
     const userId = session?.user?.id || null;
+    const effectiveTierForFetch = tierOverride || tier;
 
     const [agentResult, alertPayload, dashboardResult] = await Promise.all([
-      runIntelligenceAgents({ userId, tier }),
+      runIntelligenceAgents({ userId, tier: effectiveTierForFetch }),
       accessToken ? fetchUserAlerts(accessToken).catch(() => null) : Promise.resolve(null),
       fetchPlatformDashboard(accessToken)
         .then((payload) => ({ payload, error: "" }))
@@ -1614,6 +1821,33 @@ export default function App() {
     handleCheckout(pendingCheckoutTier, { autoRetry: true }).catch(() => {});
   }, [pendingCheckoutTier, session?.access_token]);
 
+  useEffect(() => {
+    if (effectiveSubscription.paid) {
+      setIsUpgradeModalOpen(false);
+    }
+  }, [effectiveSubscription.paid]);
+
+  const handleModeChange = (nextMode) => {
+    setAuthMode(nextMode);
+    setAuthError("");
+    setAuthNotice("");
+    setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
+    setPassword("");
+    setRecoveryPassword("");
+    setRecoveryPasswordConfirm("");
+    setAuthState((current) => {
+      if (current === AUTH_STATES.passwordRecovery) {
+        return current;
+      }
+
+      if (current === AUTH_STATES.confirmationNeeded && nextMode === "signin") {
+        return current;
+      }
+
+      return current === AUTH_STATES.signedIn ? current : AUTH_STATES.signedOut;
+    });
+  };
+
   const handleAuthSubmit = async (event) => {
     event.preventDefault();
     setAuthBusy(true);
@@ -1622,17 +1856,44 @@ export default function App() {
     setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
 
     try {
-      if (authMode === "signin") {
+      if (authMode === "recovery") {
+        if (!recoveryPassword || recoveryPassword.length < 8) {
+          throw new Error("Enter a new password with at least 8 characters.");
+        }
+
+        if (recoveryPassword !== recoveryPasswordConfirm) {
+          throw new Error("New password and confirmation must match.");
+        }
+
+        await updatePassword(recoveryPassword);
+        setAuthState(AUTH_STATES.signedIn);
+        setAuthMode("signin");
+        setAuthNotice("Password updated. Sign in with your new password if you are prompted again.");
+        setRecoveryPassword("");
+        setRecoveryPasswordConfirm("");
+      } else if (authMode === "signin") {
         await signIn(email, password);
         setAuthState(AUTH_STATES.signedIn);
-        await logCtaClick("signin-success", "auth-panel", tier).catch(() => null);
+        await trackRevenueEvent("signin_success", {
+          location: "auth-panel",
+          tier,
+          authState: AUTH_STATES.signedIn
+        });
         setEmail("");
       } else {
         const result = await signUp(email, password);
-        if (result?.session) {
+        if (shouldPreferSignInForSignup(result)) {
+          setAuthMode("signin");
+          setAuthState(AUTH_STATES.signedOut);
+          setAuthNotice("This email already belongs to a confirmed account. Sign in instead, or use Forgot password if needed.");
+        } else if (result?.session) {
           setAuthState(AUTH_STATES.signedIn);
           setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
-          await logCtaClick("signup-success", "auth-panel", tier).catch(() => null);
+          await trackRevenueEvent("signup_success", {
+            location: "auth-panel",
+            tier,
+            authState: AUTH_STATES.signedIn
+          });
           setEmail("");
         } else {
           setAuthState(AUTH_STATES.confirmationNeeded);
@@ -1659,6 +1920,11 @@ export default function App() {
         setResendCooldown(RESEND_COOLDOWN_SECONDS);
       }
 
+      if (authFailure.kind === "existing-account") {
+        setAuthMode("signin");
+        setAuthState(AUTH_STATES.signedOut);
+      }
+
       if (authFailure.kind === "email-not-confirmed") {
         setAuthState(AUTH_STATES.confirmationNeeded);
         setAuthFeedbackState(AUTH_FEEDBACK_STATES.waitingConfirmation);
@@ -1673,8 +1939,12 @@ export default function App() {
     setCheckoutError("");
 
     try {
-      await logCtaClick(`upgrade-click-${requestedTier}`, "upgrade-modal", tier).catch(() => null);
-      await logCtaClick(`checkout-start-${requestedTier}`, "upgrade-modal", tier);
+      await trackRevenueEvent("upgrade_click", {
+        location: options.autoRetry ? "checkout-auto-retry" : "upgrade-modal",
+        tier,
+        requestedTier,
+        authState
+      });
       if (!session?.access_token) {
         setPendingCheckoutTier(requestedTier);
         setAuthMode("signin");
@@ -1685,6 +1955,12 @@ export default function App() {
         );
       }
 
+      await trackRevenueEvent("checkout_start", {
+        location: options.autoRetry ? "checkout-auto-retry" : "upgrade-modal",
+        tier,
+        requestedTier,
+        authState
+      });
       const payload = await startStripeCheckout(session.access_token, requestedTier);
       if (!payload?.url) {
         throw new Error("Checkout session URL missing.");
@@ -1692,6 +1968,8 @@ export default function App() {
 
       setPendingCheckoutTier("");
       setAuthNotice(options.autoRetry ? "Checkout ready. Redirecting now." : "");
+      setCheckoutSyncState("idle");
+      setCheckoutSyncAttempt(0);
       window.location.href = payload.url;
     } catch (error) {
       setCheckoutError(withHealthcheckHint(String(error?.message || error)));
@@ -1699,6 +1977,33 @@ export default function App() {
         checkoutRetryRef.current = false;
         throw error;
       }
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!email) {
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.error);
+      setAuthError("Enter your email, then use Forgot password to send a reset link.");
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthNotice("");
+    setAuthFeedbackState(AUTH_FEEDBACK_STATES.idle);
+
+    try {
+      const redirectTo = typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : undefined;
+      await requestPasswordReset(email, redirectTo);
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.emailSent);
+      setAuthMode("signin");
+      setAuthNotice("Password reset email sent. Open the link from your inbox, then set your new password here.");
+    } catch (error) {
+      const authFailure = classifyAuthError(error, "signin");
+      setAuthFeedbackState(AUTH_FEEDBACK_STATES.error);
+      setAuthError(authFailure.message);
+    } finally {
+      setAuthBusy(false);
     }
   };
 
@@ -1810,17 +2115,54 @@ export default function App() {
     setIsUpgradeModalOpen(true);
   };
 
-  const handleManageBilling = () => {
-    setCheckoutNotice("Billing portal is not enabled yet. Add a Stripe customer portal endpoint to activate this control.");
+  const handleManageBilling = async () => {
+    setCheckoutNotice("");
+    setCheckoutError("");
+
+    if (!session?.access_token) {
+      setCheckoutError("Sign in to manage billing.");
+      return;
+    }
+
+    setBillingPortalBusy(true);
+
+    try {
+      const returnUrl = typeof window !== "undefined" ? window.location.href : undefined;
+      const payload = await createBillingPortalSession(session.access_token, returnUrl);
+      const portalUrl = payload?.url || payload?.portalUrl || payload?.billingPortalUrl;
+
+      if (!portalUrl) {
+        throw new Error("Billing portal URL missing.");
+      }
+
+      window.location.href = portalUrl;
+    } catch (error) {
+      if (error?.status === 404 || String(error?.message || error).toLowerCase().includes("not found")) {
+        setCheckoutError("Stripe customer portal route is not deployed yet. Configure the backend portal endpoint to activate Manage Billing.");
+      } else {
+        setCheckoutError(withHealthcheckHint(String(error?.message || error)));
+      }
+    } finally {
+      setBillingPortalBusy(false);
+    }
   };
 
   const handleDismissCheckoutResult = () => {
     setCheckoutResultView("");
+    setCheckoutSyncState("idle");
+    setCheckoutSyncAttempt(0);
   };
 
   const handleRetryUpgrade = () => {
     setCheckoutResultView("");
     setIsUpgradeModalOpen(true);
+  };
+
+  const handleRetrySubscriptionRefresh = () => {
+    setCheckoutNotice("Retrying subscription refresh.");
+    setCheckoutSyncState("refreshing");
+    setCheckoutSyncAttempt(0);
+    setCheckoutSyncKey((current) => current + 1);
   };
 
   const handleCopyPost = async (post) => {
@@ -1925,7 +2267,10 @@ export default function App() {
       <CheckoutReturnPanel
         checkoutState={checkoutResultView}
         onRetryCheckout={handleRetryUpgrade}
+        onRetrySync={handleRetrySubscriptionRefresh}
         onDismiss={handleDismissCheckoutResult}
+        subscriptionRefreshState={checkoutSyncState}
+        subscriptionRefreshAttempt={checkoutSyncAttempt}
       />
       {checkoutNotice ? <div className="panel-note">{checkoutNotice}</div> : null}
       {checkoutError ? <div className="panel-note panel-note-error">{checkoutError}</div> : null}
@@ -1980,13 +2325,9 @@ export default function App() {
             {intelligence.isRefreshing ? <div className="status-chip">Refreshing live feeds...</div> : null}
           </div>
           <div className="status-chip">Auth: {session?.user?.email || "Guest mode"}</div>
-          <div className="status-chip">
-            {authState === AUTH_STATES.signedIn
-              ? "Signed in"
-              : authState === AUTH_STATES.confirmationNeeded
-                ? "Email confirmation needed"
-                : "Signed out"}
-          </div>
+          <div className="status-chip">{getAuthStateLabel(authState)}</div>
+          <div className="status-chip">Subscription: {getSubscriptionStatusLabel(effectiveSubscription.status)}</div>
+          <div className="status-chip">Billing: {getBillingStateLabel(effectiveSubscription)}</div>
           <div className="status-chip">
             Paid access: {effectiveSubscription.paid ? "Unlocked" : "Free users see limited intelligence mode"}
           </div>
@@ -2002,31 +2343,36 @@ export default function App() {
               detail="Traffic routed toward subscription upgrades"
             />
             <MetricCard
-              label="Estimated Revenue"
-              value={`$${system.performance.estimatedRevenue.toLocaleString()}`}
-              detail="Projected from premium conversion flows"
+              label="Projected Revenue"
+              value={formatCurrency(Number(platformDashboard.revenue?.projectedRevenue ?? system.performance.estimatedRevenue))}
+              detail={platformDashboard.revenue?.projectedRevenue ? "Live dashboard revenue forecast" : "Projection from current content performance"}
             />
           </div>
         </div>
       </section>
 
       <section className="dashboard-grid">
-        {!session ? (
+        {showAuthPanel ? (
           <AuthPanel
             authState={authState}
             authFeedbackState={authFeedbackState}
             authMode={authMode}
             email={email}
             password={password}
+            recoveryPassword={recoveryPassword}
+            recoveryPasswordConfirm={recoveryPasswordConfirm}
             authBusy={authBusy}
             authError={authError}
             authNotice={authNotice}
             signupCooldown={signupCooldown}
             resendCooldown={resendCooldown}
-            onModeChange={setAuthMode}
+            onModeChange={handleModeChange}
             onEmailChange={setEmail}
             onPasswordChange={setPassword}
+            onRecoveryPasswordChange={setRecoveryPassword}
+            onRecoveryPasswordConfirmChange={setRecoveryPasswordConfirm}
             onSubmit={handleAuthSubmit}
+            onForgotPassword={handleForgotPassword}
             onConfirmationRetry={handleConfirmationRetry}
             onResendConfirmation={handleResendConfirmation}
             enabled={isSupabaseEnabled}
@@ -2040,7 +2386,15 @@ export default function App() {
             historyCount={intelligence.history.length}
           />
         )}
-        <AccountStatusPanel subscription={subscription || effectiveSubscription} session={session} authState={authState} onManageBilling={handleManageBilling} />
+        <AccountStatusPanel
+          subscription={subscription || effectiveSubscription}
+          session={session}
+          authState={authState}
+          onManageBilling={handleManageBilling}
+          billingPortalBusy={billingPortalBusy}
+          subscriptionRefreshState={checkoutSyncState}
+          subscriptionRefreshAttempt={checkoutSyncAttempt}
+        />
         <SubscriptionPanel pricing={pricingTiers} tier={effectiveSubscription.tier} subscription={subscription} onCheckout={handleCheckout} session={session} authState={authState} />
       </section>
 

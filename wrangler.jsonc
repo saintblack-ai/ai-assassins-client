@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "archaios-daily-automation",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-03-30",
+  "vars": {
+    "BACKEND_BASE_URL": "https://archaios-saas-worker.quandrix357.workers.dev",
+    "DASHBOARD_SIGNALS_PATH": "/api/internal/cron/dashboard-signals",
+    "ACTIVITY_FEED_PATH": "/api/internal/cron/activity-feed",
+    "METRICS_SNAPSHOTS_PATH": "/api/internal/cron/metrics-snapshots",
+    "CRON_REQUEST_TIMEOUT_MS": "30000",
+    "CRON_SCHEDULE": "17 13 * * *",
+    "SUPABASE_URL": "https://pedymtymubpirhaikymj.supabase.co",
+    "SUPABASE_CRON_RUNS_TABLE": "cron_job_runs",
+    "SUPABASE_DASHBOARD_SIGNALS_TABLE": "dashboard_signal_runs",
+    "SUPABASE_ACTIVITY_FEED_TABLE": "activity_feed_runs",
+    "SUPABASE_METRICS_SNAPSHOTS_TABLE": "metrics_snapshots"
+  },
+  "triggers": {
+    "crons": [
+      "17 13 * * *"
+    ]
+  }
+}

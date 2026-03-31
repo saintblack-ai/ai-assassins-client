@@ -1,0 +1,14 @@
+BACKEND_BASE_URL=http://127.0.0.1:8787
+# Optional bearer token required by your backend cron endpoints.
+CRON_AUTH_TOKEN=
+SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=
+DASHBOARD_SIGNALS_PATH=/api/internal/cron/dashboard-signals
+ACTIVITY_FEED_PATH=/api/internal/cron/activity-feed
+METRICS_SNAPSHOTS_PATH=/api/internal/cron/metrics-snapshots
+CRON_REQUEST_TIMEOUT_MS=30000
+SUPABASE_REQUEST_TIMEOUT_MS=15000
+SUPABASE_CRON_RUNS_TABLE=cron_job_runs
+SUPABASE_DASHBOARD_SIGNALS_TABLE=dashboard_signal_runs
+SUPABASE_ACTIVITY_FEED_TABLE=activity_feed_runs
+SUPABASE_METRICS_SNAPSHOTS_TABLE=metrics_snapshots

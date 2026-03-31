@@ -23,6 +23,10 @@ function toFriendlyApiError(path, error) {
     return new Error("Checkout is temporarily unavailable. Verify billing configuration and try again.");
   }
 
+  if (path === "/api/stripe/customer-portal" || path === "/api/stripe/portal") {
+    return new Error("Billing portal is temporarily unavailable. Verify Stripe customer portal configuration and try again.");
+  }
+
   if (path === "/api/leads") {
     return new Error("Lead capture is temporarily unavailable. Check backend health and try again.");
   }
@@ -58,7 +62,7 @@ export function subscribeToAuthChanges(callback) {
     return { data: { subscription: { unsubscribe() {} } } };
   }
 
-  return supabase.auth.onAuthStateChange((_event, session) => callback(session));
+  return supabase.auth.onAuthStateChange((event, session) => callback(event, session));
 }
 
 export async function signIn(email, password) {
@@ -80,6 +84,35 @@ export async function signUp(email, password) {
   }
 
   const { data, error } = await supabase.auth.signUp({ email, password });
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function requestPasswordReset(email, redirectTo) {
+  if (!supabase) {
+    throw new Error("Supabase auth is not configured");
+  }
+
+  const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function updatePassword(password) {
+  if (!supabase) {
+    throw new Error("Supabase auth is not configured");
+  }
+
+  const { data, error } = await supabase.auth.updateUser({ password });
   if (error) {
     throw error;
   }
@@ -139,6 +172,19 @@ export async function getUserTier(userId) {
   return "free";
 }
 
+export function shouldPreferSignInForSignup(result) {
+  const user = result?.user;
+  if (!user) {
+    return false;
+  }
+
+  if (user.email_confirmed_at || user.confirmed_at) {
+    return true;
+  }
+
+  return Array.isArray(user.identities) && user.identities.length === 0;
+}
+
 async function apiFetch(path, accessToken, options = {}) {
   const url = `${API_BASE_URL}${path}`;
 
@@ -154,15 +200,25 @@ async function apiFetch(path, accessToken, options = {}) {
 
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
+      const apiError = new Error(payload?.error || `request_failed_${response.status}`);
+      apiError.status = response.status;
+
       logPlatformEvent("error", "api-response", {
         path,
         status: response.status,
-        error: payload?.error || `request_failed_${response.status}`
+        error: apiError.message
       });
-      throw new Error(payload?.error || `request_failed_${response.status}`);
+      throw apiError;
     }
 
-    if (path === "/api/stripe/checkout" || path === "/api/leads" || path === "/api/platform/dashboard") {
+    if (
+      path === "/api/stripe/checkout" ||
+      path === "/api/stripe/customer-portal" ||
+      path === "/api/stripe/portal" ||
+      path === "/api/leads" ||
+      path === "/api/platform/dashboard" ||
+      path === "/api/cta-click"
+    ) {
       logPlatformEvent("info", "api-success", { path, status: response.status });
     }
 
@@ -173,8 +229,27 @@ async function apiFetch(path, accessToken, options = {}) {
       url,
       message: String(error?.message || error)
     });
-    throw toFriendlyApiError(path, error);
+    const friendlyError = toFriendlyApiError(path, error);
+    friendlyError.status = error?.status;
+    throw friendlyError;
   }
+}
+
+async function apiFetchFirst(paths, accessToken, options = {}) {
+  let lastError = null;
+
+  for (const path of paths) {
+    try {
+      return await apiFetch(path, accessToken, options);
+    } catch (error) {
+      lastError = error;
+      if (error?.status !== 404) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error("Request failed");
 }
 
 export async function fetchUserAlerts(accessToken) {
@@ -189,6 +264,15 @@ export async function createCheckoutSession(accessToken, tier) {
   return apiFetch("/api/stripe/checkout", accessToken, {
     method: "POST",
     body: JSON.stringify({ tier })
+  });
+}
+
+export async function createBillingPortalSession(accessToken, returnUrl) {
+  return apiFetchFirst(["/api/stripe/customer_portal", "/api/stripe/customer-portal", "/api/stripe/portal"], accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      ...(returnUrl ? { returnUrl } : {})
+    })
   });
 }
 
@@ -221,6 +305,29 @@ export async function logCtaClick(cta, location, tier = "free") {
   });
 }
 
+export async function trackRevenueEvent(event, context = {}) {
+  const detail = {
+    event,
+    location: context.location || "app",
+    tier: context.tier || "free",
+    requestedTier: context.requestedTier || "",
+    authState: context.authState || "",
+    source: context.source || "dashboard",
+    timestamp: new Date().toISOString()
+  };
+
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("archaios:revenue-event", { detail }));
+
+    if (Array.isArray(window.dataLayer)) {
+      window.dataLayer.push(detail);
+    }
+  }
+
+  const location = [detail.location, detail.requestedTier, detail.authState].filter(Boolean).join(":");
+  return logCtaClick(event, location || "app", detail.tier).catch(() => null);
+}
+
 export function classifyAuthError(error, mode = "signin") {
   const message = String(error?.message || error || "Authentication failed");
   const lowered = message.toLowerCase();
@@ -250,7 +357,19 @@ export function classifyAuthError(error, mode = "signin") {
   if (lowered.includes("invalid login credentials")) {
     return {
       kind: "invalid-credentials",
-      message: "Email or password is incorrect."
+      message: "Email or password is incorrect. Try signing in again, or use Forgot password to reset access."
+    };
+  }
+
+  if (
+    lowered.includes("already registered") ||
+    lowered.includes("already been registered") ||
+    lowered.includes("user already registered") ||
+    lowered.includes("user_already_exists")
+  ) {
+    return {
+      kind: "existing-account",
+      message: "This email is already confirmed. Sign in instead, or use Forgot password if you need to reset access."
     };
   }
 

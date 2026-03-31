@@ -1,14 +1,24 @@
-name: Deploy Vite site to GitHub Pages
+name: Build and Deploy Frontend
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+  schedule:
+    - cron: "17 13 * * *"
 
 permissions:
   contents: read
   pages: write
   id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
 
 jobs:
   build:
@@ -21,20 +31,30 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Build
+      - name: Build frontend
+        env:
+          VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: npm run build
 
-      - name: Upload artifact
+      - name: Upload Pages artifact
+        if: github.event_name != 'schedule'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
   deploy:
+    if: github.event_name != 'schedule'
     needs: build
     runs-on: ubuntu-latest
 
@@ -42,7 +62,57 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - name: Deploy
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  healthcheck:
+    if: always() && needs.build.result == 'success' && (github.event_name == 'schedule' || needs.deploy.result == 'success')
+    needs:
+      - build
+      - deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve live URLs
+        id: urls
+        env:
+          DEPLOYED_FRONTEND_URL: ${{ needs.deploy.outputs.page_url }}
+          PUBLIC_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            if [ "$(printf '%s' "${REPO_NAME}" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s.github.io' "${OWNER}" | tr '[:upper:]' '[:lower:]')" ]; then
+              FRONTEND_URL="https://${OWNER}.github.io/"
+            else
+              FRONTEND_URL="https://${OWNER}.github.io/${REPO_NAME}/"
+            fi
+          else
+            FRONTEND_URL="${DEPLOYED_FRONTEND_URL}"
+          fi
+
+          if [ -z "${PUBLIC_BACKEND_URL}" ]; then
+            echo "VITE_BACKEND_URL GitHub variable is required for backend health checks." >&2
+            exit 1
+          fi
+
+          BACKEND_URL="$(printf '%s' "${PUBLIC_BACKEND_URL}" | sed 's#/*$##')"
+
+          echo "frontend_url=${FRONTEND_URL}" >> "${GITHUB_OUTPUT}"
+          echo "backend_health_url=${BACKEND_URL}/api/health" >> "${GITHUB_OUTPUT}"
+
+      - name: Check frontend health
+        run: |
+          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.frontend_url }}" > frontend.html
+          grep -qi "<html" frontend.html
+
+      - name: Check backend health
+        run: |
+          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.backend_health_url }}" > backend-health.json
+          test -s backend-health.json
