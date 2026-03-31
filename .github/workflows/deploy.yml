@@ -106,12 +106,12 @@ jobs:
       - name: Resolve live URLs
         id: urls
         env:
-          PUBLIC_BACKEND_URL: ${{ vars.VITE_BACKEND_URL != '' && vars.VITE_BACKEND_URL || secrets.VITE_BACKEND_URL }}
+          PUBLIC_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
         run: |
           FRONTEND_URL="$(printf '%s' "${FRONTEND_HEALTHCHECK_URL}" | sed 's#/*$##')/"
 
           if [ -z "${PUBLIC_BACKEND_URL}" ]; then
-            echo "::warning::VITE_BACKEND_URL is not configured in GitHub Actions vars or secrets. Backend healthcheck will be skipped."
+            echo "::warning::VITE_BACKEND_URL GitHub variable is not configured. Backend healthcheck will be skipped."
             BACKEND_ENABLED="false"
             BACKEND_HEALTH_URL=""
           else
@@ -124,11 +124,7 @@ BACKEND_HEALTH_URL="${VITE_BACKEND_URL}/api/health"
           echo "backend_enabled=${BACKEND_ENABLED}" >> "$GITHUB_OUTPUT"
           echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "$GITHUB_OUTPUT"
           echo "Resolved frontend healthcheck URL: ${FRONTEND_URL}"
-          if [ "${BACKEND_ENABLED}" = "true" ]; then
-            echo "Resolved backend healthcheck URL: ${BACKEND_HEALTH_URL}"
-          else
-            echo "Resolved backend healthcheck URL: skipped"
-          fi
+          echo "Resolved backend healthcheck URL: ${BACKEND_HEALTH_URL:-skipped}"
 
       - name: Wait for Pages to settle
         run: |
