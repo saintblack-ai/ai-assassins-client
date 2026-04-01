@@ -96,46 +96,21 @@ jobs:
         uses: actions/deploy-pages@v4
 
   healthcheck:
-    if: always() && needs.build.result == 'success' && (github.event_name == 'schedule' || needs.deploy.result == 'success')
+    if: always()
     needs:
       - build
       - deploy
     runs-on: ubuntu-latest
 
     steps:
-      - name: Resolve live URLs
-        id: urls
+      - name: Wait
         run: |
-          FRONTEND_URL="$(printf '%s' "${FRONTEND_HEALTHCHECK_URL}" | sed 's#/*$##')/"
-          BACKEND_ENABLED="true"
-          BACKEND_URL="https://archaios-saas-worker.quandrix357.workers.dev"
-          BACKEND_HEALTH_URL="${BACKEND_URL}/api/health"
+          sleep 10
 
-          echo "frontend_url=${FRONTEND_URL}" >> "$GITHUB_OUTPUT"
-          echo "backend_enabled=${BACKEND_ENABLED}" >> "$GITHUB_OUTPUT"
-          echo "backend_health_url=${BACKEND_HEALTH_URL}" >> "$GITHUB_OUTPUT"
-          echo "Resolved frontend healthcheck URL: ${FRONTEND_URL}"
-          echo "Resolved backend healthcheck URL: ${BACKEND_HEALTH_URL}"
-
-      - name: Wait for Pages to settle
+      - name: Check frontend
         run: |
-          echo "Waiting 20 seconds before health checks..."
-          sleep 20
+          curl --fail https://saintblack-ai.github.io/ai-assassins-client/ || exit 1
 
-      - name: Check frontend health
+      - name: Check backend
         run: |
-          echo "Checking frontend URL: ${{ steps.urls.outputs.frontend_url }}"
-          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.frontend_url }}" > frontend.html
-          grep -qi "<html" frontend.html
-
-      - name: Skip backend health
-        if: steps.urls.outputs.backend_enabled != 'true'
-        run: |
-          echo "Skipping backend healthcheck because no backend URL was configured."
-
-      - name: Check backend health
-        if: steps.urls.outputs.backend_enabled == 'true'
-        run: |
-          echo "Checking backend URL: ${{ steps.urls.outputs.backend_health_url }}"
-          curl --fail --silent --show-error --location --retry 3 "${{ steps.urls.outputs.backend_health_url }}" > backend-health.json
-          test -s backend-health.json
+          curl --fail https://archaios-saas-worker.quandrix357.workers.dev/api/health || exit 1
