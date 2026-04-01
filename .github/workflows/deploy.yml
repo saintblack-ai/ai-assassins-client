@@ -14,12 +14,11 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
+  group: github-pages-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "20"
-  DEFAULT_BACKEND_URL: "https://archaios-saas-worker.quandrix357.workers.dev"
+  NODE_VERSION: "24"
   FRONTEND_HEALTHCHECK_URL: "https://saintblack-ai.github.io/ai-assassins-client/"
 
 jobs:
@@ -28,10 +27,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -48,57 +47,40 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
         run: |
+          missing=0
+
           if [ -z "${VITE_SUPABASE_URL}" ]; then
-            echo "::error::VITE_SUPABASE_URL missing."
-            exit 1
+            echo "::error::Missing required GitHub Actions variable VITE_SUPABASE_URL."
+            missing=1
           fi
-          echo "VITE_SUPABASE_URL present"
 
           if [ -z "${VITE_SUPABASE_ANON_KEY}" ]; then
-            echo "::error::VITE_SUPABASE_ANON_KEY missing."
-            exit 1
+            echo "::error::Missing required GitHub Actions secret VITE_SUPABASE_ANON_KEY."
+            missing=1
           fi
-          echo "VITE_SUPABASE_ANON_KEY present"
 
           if [ -z "${VITE_BACKEND_URL}" ]; then
-            echo "::error::VITE_BACKEND_URL missing."
+            echo "::error::Missing required GitHub Actions variable VITE_BACKEND_URL."
+            missing=1
+          fi
+
+          if [ "${missing}" -ne 0 ]; then
+            echo "Required GitHub Pages build configuration is incomplete."
             exit 1
           fi
-          echo "VITE_BACKEND_URL present"
+
+          echo "Required build configuration is present."
 
       - name: Build frontend
         env:
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
-        run: |
-          echo "Required GitHub Actions configuration for a public frontend build:"
-          echo "  - VITE_SUPABASE_URL"
-          echo "  - VITE_SUPABASE_ANON_KEY"
-          echo "Optional backend override used for build + healthcheck:"
-          echo "  - VITE_BACKEND_URL"
-
-          if [ -z "${VITE_SUPABASE_URL}" ]; then
-            echo "::error::Missing VITE_SUPABASE_URL. Set GitHub Actions variable VITE_SUPABASE_URL."
-            exit 1
-          fi
-
-          if [ -z "${VITE_SUPABASE_ANON_KEY}" ]; then
-            echo "::error::Missing VITE_SUPABASE_ANON_KEY. Set GitHub Actions secret VITE_SUPABASE_ANON_KEY."
-            exit 1
-          fi
-
-          if [ -z "${VITE_BACKEND_URL}" ]; then
-            echo "::warning::VITE_BACKEND_URL GitHub variable is missing. Falling back to ${DEFAULT_BACKEND_URL}."
-            export VITE_BACKEND_URL="${DEFAULT_BACKEND_URL}"
-          fi
-
-          echo "Build frontend env configuration resolved."
-          npm run build
+        run: npm run build
 
       - name: Upload Pages artifact
         if: github.event_name != 'schedule'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: dist
 
@@ -129,7 +111,7 @@ jobs:
     steps:
       - name: Wait
         run: |
-          sleep 10
+          sleep 15
 
       - name: Check frontend
         run: |
