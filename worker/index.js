@@ -1,19 +1,22 @@
 const DEFAULT_DASHBOARD_SIGNALS_PATH = "/api/internal/cron/dashboard-signals";
 const DEFAULT_ACTIVITY_FEED_PATH = "/api/internal/cron/activity-feed";
 const DEFAULT_METRICS_SNAPSHOTS_PATH = "/api/internal/cron/metrics-snapshots";
+const STRIPE_API_BASE_URL = "https://api.stripe.com/v1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 const DEFAULT_SUPABASE_TIMEOUT_MS = 15000;
+const DEFAULT_STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 
 function normalizeBaseUrl(value) {
   return String(value || "").replace(/\/+$/, "");
 }
 
-function createJsonResponse(payload, status = 200) {
+function createJsonResponse(payload, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(payload, null, 2), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      ...extraHeaders
     }
   });
 }
@@ -21,6 +24,410 @@ function createJsonResponse(payload, status = 200) {
 function logEvent(level, event, context = {}) {
   const logger = level === "error" ? console.error : console.log;
   logger(JSON.stringify({ level, event, ...context }));
+}
+
+function buildHealthPayload(env) {
+  return {
+    ok: true,
+    service: "archaios-daily-automation",
+    backendBaseUrlConfigured: Boolean(normalizeBaseUrl(env.BACKEND_BASE_URL)),
+    cron: env.CRON_SCHEDULE || "17 13 * * *",
+    jobs: buildJobDefinitions(env).map((job) => ({ key: job.key, path: job.path }))
+  };
+}
+
+function createCorsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "Content-Type, Authorization",
+    "access-control-allow-methods": "GET, POST, OPTIONS"
+  };
+}
+
+function createOptionsResponse() {
+  return new Response(null, {
+    status: 204,
+    headers: createCorsHeaders()
+  });
+}
+
+function maskIdentifier(value) {
+  const normalized = String(value || "");
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= 8) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 4)}...${normalized.slice(-4)}`;
+}
+
+function decodeBase64Url(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+
+  return atob(`${normalized}${padding}`);
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length < 2) {
+      return null;
+    }
+
+    return JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    return null;
+  }
+}
+
+function getAuthenticatedUserContext(request) {
+  const authorization = request.headers.get("authorization") || "";
+  if (!authorization.startsWith("Bearer ")) {
+    return { userId: "", email: "" };
+  }
+
+  const payload = decodeJwtPayload(authorization.slice("Bearer ".length));
+  return {
+    userId: String(payload?.sub || ""),
+    email: String(payload?.email || "")
+  };
+}
+
+function timingSafeEqual(left, right) {
+  const leftValue = String(left || "");
+  const rightValue = String(right || "");
+
+  if (leftValue.length !== rightValue.length) {
+    return false;
+  }
+
+  let result = 0;
+  for (let index = 0; index < leftValue.length; index += 1) {
+    result |= leftValue.charCodeAt(index) ^ rightValue.charCodeAt(index);
+  }
+
+  return result === 0;
+}
+
+async function hmacSha256Hex(secret, payload) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+
+  return Array.from(new Uint8Array(signature))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function parseStripeSignatureHeader(header) {
+  return String(header || "")
+    .split(",")
+    .map((part) => part.trim())
+    .reduce(
+      (accumulator, part) => {
+        const [key, value] = part.split("=");
+        if (!key || !value) {
+          return accumulator;
+        }
+
+        if (key === "t") {
+          accumulator.timestamp = value;
+        }
+
+        if (key === "v1") {
+          accumulator.signatures.push(value);
+        }
+
+        return accumulator;
+      },
+      { timestamp: "", signatures: [] }
+    );
+}
+
+async function verifyStripeSignature(request, rawBody, env) {
+  const webhookSecret = String(env.STRIPE_WEBHOOK_SECRET || "");
+  if (!webhookSecret) {
+    throw new Error("STRIPE_WEBHOOK_SECRET is not configured.");
+  }
+
+  const parsed = parseStripeSignatureHeader(request.headers.get("stripe-signature"));
+  if (!parsed.timestamp || parsed.signatures.length === 0) {
+    throw new Error("Missing Stripe signature");
+  }
+
+  const timestampSeconds = Number(parsed.timestamp);
+  if (!Number.isFinite(timestampSeconds)) {
+    throw new Error("Invalid Stripe signature timestamp");
+  }
+
+  const toleranceSeconds = Number(env.STRIPE_WEBHOOK_TOLERANCE_SECONDS || DEFAULT_STRIPE_WEBHOOK_TOLERANCE_SECONDS);
+  const currentSeconds = Math.floor(Date.now() / 1000);
+  if (Math.abs(currentSeconds - timestampSeconds) > toleranceSeconds) {
+    throw new Error("Stripe signature timestamp outside tolerance");
+  }
+
+  const signedPayload = `${parsed.timestamp}.${rawBody}`;
+  const expectedSignature = await hmacSha256Hex(webhookSecret, signedPayload);
+  const valid = parsed.signatures.some((signature) => timingSafeEqual(signature, expectedSignature));
+
+  if (!valid) {
+    throw new Error("Invalid Stripe signature");
+  }
+}
+
+function getSupabaseConfig(env) {
+  return {
+    url: normalizeBaseUrl(env.SUPABASE_URL || env.VITE_SUPABASE_URL),
+    serviceRoleKey: String(env.SUPABASE_SERVICE_ROLE_KEY || "")
+  };
+}
+
+async function supabaseRequest(env, path, options = {}) {
+  const { url, serviceRoleKey } = getSupabaseConfig(env);
+  if (!url || !serviceRoleKey) {
+    throw new Error("Supabase service role configuration is incomplete.");
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = Number(env.SUPABASE_REQUEST_TIMEOUT_MS || DEFAULT_SUPABASE_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort("supabase_timeout"), timeoutMs);
+
+  try {
+    const response = await fetch(`${url}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        apikey: serviceRoleKey,
+        authorization: `Bearer ${serviceRoleKey}`,
+        ...(options.method && options.method !== "GET" ? { "content-type": "application/json" } : {}),
+        ...(options.headers || {})
+      }
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.message || payload?.error || `supabase_http_${response.status}`);
+    }
+
+    return payload;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function normalizeSubscriptionRecord(input) {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+}
+
+function extractWebhookMetadata(object = {}) {
+  const metadata = object.metadata || {};
+
+  return {
+    userId: String(metadata.user_id || metadata.userId || object.client_reference_id || "")
+  };
+}
+
+function buildSubscriptionRecordFromCheckoutSession(session) {
+  const metadata = extractWebhookMetadata(session);
+  const status =
+    session.payment_status === "paid" || session.status === "complete" ? "active" : "incomplete";
+
+  return normalizeSubscriptionRecord({
+    user_id: metadata.userId,
+    plan: "pro",
+    status,
+    updated_at: new Date().toISOString()
+  });
+}
+
+function buildSubscriptionRecordFromSubscription(subscription) {
+  const metadata = extractWebhookMetadata(subscription);
+
+  return normalizeSubscriptionRecord({
+    user_id: metadata.userId,
+    plan: "pro",
+    status: String(subscription.status || "active"),
+    updated_at: new Date().toISOString()
+  });
+}
+
+async function findExistingSubscription(env, record) {
+  if (record.user_id) {
+    const byUser = await supabaseRequest(
+      env,
+      `/rest/v1/subscriptions?select=id,user_id&user_id=eq.${encodeURIComponent(record.user_id)}&order=updated_at.desc.nullslast&limit=1`
+    );
+
+    if (Array.isArray(byUser) && byUser.length > 0) {
+      return byUser[0];
+    }
+  }
+
+  return null;
+}
+
+async function upsertSubscriptionRecord(env, record) {
+  const existing = await findExistingSubscription(env, record);
+
+  if (existing?.id) {
+    const updated = await supabaseRequest(env, `/rest/v1/subscriptions?id=eq.${existing.id}`, {
+      method: "PATCH",
+      headers: {
+        prefer: "return=representation"
+      },
+      body: JSON.stringify(record)
+    });
+
+    return {
+      action: "updated",
+      row: Array.isArray(updated) ? updated[0] || null : updated
+    };
+  }
+
+  const inserted = await supabaseRequest(env, "/rest/v1/subscriptions", {
+    method: "POST",
+    headers: {
+      prefer: "return=representation"
+    },
+    body: JSON.stringify([record])
+  });
+
+  return {
+    action: "inserted",
+    row: Array.isArray(inserted) ? inserted[0] || null : inserted
+  };
+}
+
+async function handleStripeWebhookEvent(event, env) {
+  if (event.type === "checkout.session.completed") {
+    const record = buildSubscriptionRecordFromCheckoutSession(event.data?.object || {});
+    if (!record.user_id) {
+      throw new Error("Webhook session is missing user_id metadata.");
+    }
+
+    return upsertSubscriptionRecord(env, record);
+  }
+
+  if (event.type === "customer.subscription.created") {
+    const record = buildSubscriptionRecordFromSubscription(event.data?.object || {});
+    if (!record.user_id) {
+      throw new Error("Webhook subscription is missing user_id metadata.");
+    }
+
+    return upsertSubscriptionRecord(env, record);
+  }
+
+  return {
+    action: "ignored",
+    row: null
+  };
+}
+
+function buildCheckoutUrl(baseUrl, status) {
+  const url = new URL(baseUrl);
+  url.searchParams.set("checkout", status);
+  return url.toString();
+}
+
+function resolveCheckoutReturnUrl(request, explicitUrl, fallbackStatus) {
+  if (explicitUrl) {
+    return explicitUrl;
+  }
+
+  const origin = request.headers.get("origin");
+  if (origin) {
+    return buildCheckoutUrl(origin, fallbackStatus);
+  }
+
+  return buildCheckoutUrl(request.url, fallbackStatus);
+}
+
+function getStripePriceForTier(env, tier) {
+  if (tier === "pro") {
+    return String(env.STRIPE_PRICE_PRO || "");
+  }
+
+  return "";
+}
+
+async function createStripeCheckoutSession(env, payload, request) {
+  const stripeSecretKey = String(env.STRIPE_SECRET_KEY || "");
+  const requestedTier = String(payload?.tier || "pro").toLowerCase();
+  const stripePrice = getStripePriceForTier(env, requestedTier);
+  const userContext = getAuthenticatedUserContext(request);
+
+  if (!stripeSecretKey) {
+    throw new Error("STRIPE_SECRET_KEY is not configured.");
+  }
+
+  if (!stripePrice) {
+    throw new Error(`No Stripe price is configured for tier "${requestedTier}".`);
+  }
+
+  if (!userContext.userId) {
+    throw new Error("Unauthorized");
+  }
+
+  const successUrl = resolveCheckoutReturnUrl(request, payload?.successUrl, "success");
+  const cancelUrl = resolveCheckoutReturnUrl(request, payload?.cancelUrl, "cancel");
+  const form = new URLSearchParams();
+
+  form.set("mode", "subscription");
+  form.set("success_url", successUrl);
+  form.set("cancel_url", cancelUrl);
+  form.set("line_items[0][price]", stripePrice);
+  form.set("line_items[0][quantity]", "1");
+  form.set("allow_promotion_codes", "true");
+  form.set("metadata[tier]", requestedTier);
+  form.set("subscription_data[metadata][tier]", requestedTier);
+  if (userContext.userId) {
+    form.set("client_reference_id", userContext.userId);
+    form.set("metadata[user_id]", userContext.userId);
+    form.set("subscription_data[metadata][user_id]", userContext.userId);
+  }
+  if (userContext.email) {
+    form.set("customer_email", userContext.email);
+    form.set("metadata[user_email]", userContext.email);
+    form.set("subscription_data[metadata][user_email]", userContext.email);
+  }
+
+  const response = await fetch(`${STRIPE_API_BASE_URL}/checkout/sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${stripeSecretKey}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: form.toString()
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const stripeMessage = result?.error?.message || `stripe_http_${response.status}`;
+    throw new Error(stripeMessage);
+  }
+
+  if (!result?.url) {
+    throw new Error("Stripe did not return a checkout URL.");
+  }
+
+  return {
+    ok: true,
+    id: result.id,
+    url: result.url,
+    mode: result.mode,
+    tier: requestedTier
+  };
 }
 
 function buildJobDefinitions(env) {
@@ -276,6 +683,39 @@ async function handleCronEndpoint({ request, env, jobKey, generatePayload, persi
   });
 }
 
+async function handleStripeCheckoutRequest(request, env) {
+  const payload = await readJsonBody(request);
+  const checkout = await createStripeCheckoutSession(env, payload, request);
+  return createJsonResponse(checkout, 200, createCorsHeaders());
+}
+
+async function handleStripeWebhookRequest(request, env) {
+  const rawBody = await request.text();
+  await verifyStripeSignature(request, rawBody, env);
+
+  const event = JSON.parse(rawBody || "{}");
+  const result = await handleStripeWebhookEvent(event, env);
+
+  logEvent("info", "stripe.webhook.processed", {
+    type: event.type || "unknown",
+    action: result.action,
+    userId: maskIdentifier(result.row?.user_id || event.data?.object?.metadata?.user_id),
+    customerId: maskIdentifier(result.row?.stripe_customer_id || event.data?.object?.customer),
+    subscriptionId: maskIdentifier(result.row?.stripe_subscription_id || event.data?.object?.id || event.data?.object?.subscription)
+  });
+
+  return createJsonResponse(
+    {
+      ok: true,
+      received: true,
+      type: event.type || "unknown",
+      action: result.action
+    },
+    200,
+    createCorsHeaders()
+  );
+}
+
 async function runBackendJob(job, env, runId, baseUrlOverride = "") {
   const backendBaseUrl = normalizeBaseUrl(baseUrlOverride || env.BACKEND_BASE_URL);
   if (!backendBaseUrl) {
@@ -398,15 +838,51 @@ async function runDailyAutomation(env, trigger = "scheduled", selectedJobKey = "
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const corsHeaders = createCorsHeaders();
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return createJsonResponse({
-        ok: true,
-        service: "archaios-daily-automation",
-        backendBaseUrlConfigured: Boolean(normalizeBaseUrl(env.BACKEND_BASE_URL)),
-        cron: env.CRON_SCHEDULE || "17 13 * * *",
-        jobs: buildJobDefinitions(env).map((job) => ({ key: job.key, path: job.path }))
-      });
+    if (request.method === "OPTIONS") {
+      return createOptionsResponse();
+    }
+
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
+      return createJsonResponse(buildHealthPayload(env), 200, corsHeaders);
+    }
+
+    if (
+      request.method === "POST" &&
+      (url.pathname === "/api/stripe/create-checkout-session" || url.pathname === "/api/stripe/checkout")
+    ) {
+      try {
+        return await handleStripeCheckoutRequest(request, env);
+      } catch (error) {
+        return createJsonResponse(
+          {
+            ok: false,
+            error: String(error?.message || error || "stripe_checkout_failed")
+          },
+          500,
+          corsHeaders
+        );
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/stripe/webhook") {
+      try {
+        return await handleStripeWebhookRequest(request, env);
+      } catch (error) {
+        logEvent("error", "stripe.webhook.failed", {
+          message: String(error?.message || error || "stripe_webhook_failed")
+        });
+
+        return createJsonResponse(
+          {
+            ok: false,
+            error: String(error?.message || error || "stripe_webhook_failed")
+          },
+          400,
+          corsHeaders
+        );
+      }
     }
 
     if (request.method === "POST" && url.pathname === (env.DASHBOARD_SIGNALS_PATH || DEFAULT_DASHBOARD_SIGNALS_PATH)) {
@@ -443,7 +919,7 @@ export default {
       try {
         const selectedJobKey = url.searchParams.get("job") || "";
         const summary = await runDailyAutomation(env, "manual", selectedJobKey, url.origin);
-        return createJsonResponse(summary, 200);
+        return createJsonResponse(summary, 200, corsHeaders);
       } catch (error) {
         return createJsonResponse(
           {
@@ -451,12 +927,13 @@ export default {
             trigger: "manual",
             error: String(error?.message || error || "manual_cron_failed")
           },
-          500
+          500,
+          corsHeaders
         );
       }
     }
 
-    return createJsonResponse({ ok: false, error: "not_found" }, 404);
+    return createJsonResponse({ ok: false, error: "not_found" }, 404, corsHeaders);
   },
 
   async scheduled(controller, env, ctx) {
