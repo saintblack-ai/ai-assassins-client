@@ -78,6 +78,16 @@ jobs:
           VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
         run: npm run build
 
+
+      - name: Add GitHub Pages SPA route fallbacks
+        if: github.event_name != 'schedule'
+        run: |
+          cp dist/index.html dist/404.html
+
+          for route in landing pricing dashboard operator book-growth; do
+            mkdir -p "dist/${route}"
+            cp dist/index.html "dist/${route}/index.html"
+          done
       - name: Upload Pages artifact
         if: github.event_name != 'schedule'
         uses: actions/upload-pages-artifact@v4
