@@ -9,8 +9,8 @@ export const PRICING_TIERS = [
   {
     id: "pro",
     name: "Pro",
-    price: 49,
-    displayPrice: "$49/month",
+    price: 49.99,
+    displayPrice: "$49.99/month",
     stripeCheckoutUrl: "https://buy.stripe.com/cNi00c09ydYl0EjbHJbII02",
     features: [
       "Full AI dashboard",
@@ -22,8 +22,8 @@ export const PRICING_TIERS = [
   {
     id: "elite",
     name: "Elite",
-    price: 99,
-    displayPrice: "$99/month",
+    price: 99.99,
+    displayPrice: "$99.99/month",
     stripeCheckoutUrl: "https://buy.stripe.com/eVq00c5tS9I55YD135bII05",
     features: [
       "Priority signals",
@@ -32,6 +32,11 @@ export const PRICING_TIERS = [
     ]
   }
 ];
+
+export const ONE_OFF_PAYMENT_LINKS = {
+  5: "https://buy.stripe.com/aFabIU09y2fD4Uz5jlbII06",
+  7: "https://buy.stripe.com/cNifZaf4sbQd0Ejh23bII04"
+};
 
 export const PRICING_TIER_MAP = Object.fromEntries(
   PRICING_TIERS.map((tier) => [tier.id, tier])
