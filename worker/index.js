@@ -848,6 +848,65 @@ export default {
       return createJsonResponse(buildHealthPayload(env), 200, corsHeaders);
     }
 
+    if (request.method === "GET" && url.pathname === "/api/platform/dashboard") {
+      return createJsonResponse(
+        {
+          ok: true,
+          source: "ai-assassins-worker",
+          userTier: "free",
+          pricing: [
+            {
+              id: "free",
+              name: "Free Preview",
+              price: "$0",
+              headline: "Preview intelligence and upgrade when ready."
+            },
+            {
+              id: "pro",
+              name: "Pro Command",
+              price: "$49/mo",
+              headline: "Full daily briefing and premium dashboard access."
+            },
+            {
+              id: "elite",
+              name: "Elite Priority",
+              price: "$99/mo",
+              headline: "Priority signals, elite reports, and deeper analysis."
+            }
+          ],
+          briefing: {
+            title: "AI Assassins Preview Briefing",
+            summary:
+              "Dashboard endpoint is online. Live intelligence, revenue signals, and activity data will populate as Supabase and Stripe events sync.",
+            actions: [
+              "Verify Supabase session",
+              "Test Pro checkout",
+              "Confirm Stripe webhook sync",
+              "Review Elite access gate"
+            ]
+          },
+          activityFeed: [
+            {
+              label: "Worker online",
+              detail: "The local Cloudflare Worker is responding on /api/platform/dashboard."
+            },
+            {
+              label: "Checkout path ready",
+              detail: "Stripe checkout route is available through /api/stripe/checkout."
+            }
+          ],
+          metrics: {
+            status: "preview",
+            backend: "online",
+            monetization: "configured",
+            tier: "free"
+          }
+        },
+        200,
+        corsHeaders
+      );
+    }
+
     if (
       request.method === "POST" &&
       (url.pathname === "/api/stripe/create-checkout-session" || url.pathname === "/api/stripe/checkout")
