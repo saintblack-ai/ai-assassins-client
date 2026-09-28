@@ -19,10 +19,10 @@ The connected live Stripe account is **QX Technology**.
 
 Verified active recurring products relevant to AI Assassins:
 
-| Tier | Stripe product | Live recurring price |
-| --- | --- | ---: |
-| Pro | `prod_UEkghCBxek5btm` | $49/month |
-| Elite | `prod_UEkjAlfX4aTXLE` | $99/month |
+| Tier | Stripe product | Stripe price | Live recurring price |
+| --- | --- | --- | ---: |
+| Pro | `prod_UEkghCBxek5btm` | `price_1TGHBW2E09QnDRssi68AAji4` | $49/month |
+| Elite | `prod_UEkjAlfX4aTXLE` | `price_1TGHEP2E09QnDRss16xkuUXy` | $99/month |
 
 The current public client copy had drifted to $49.99 / $99.99.
 
@@ -90,3 +90,19 @@ Keep invoice events and add:
 - `invoice.payment_failed`
 
 No live webhook settings were changed during this audit.
+
+## Repair branch work completed
+
+The branch now contains these non-production changes:
+
+- Frontend display prices aligned to live Stripe: Pro $49/month, Elite $99/month.
+- Client fallback tier lookup changed from nonexistent `tier` to restored-schema `plan`.
+- App subscription normalization now accepts `plan`.
+- Worker checkout now supports both `STRIPE_PRICE_PRO` and `STRIPE_PRICE_ELITE`.
+- Worker authentication path now verifies the bearer token against Supabase Auth before using the user identity.
+- Worker subscription webhook logic now stages created/updated/deleted lifecycle handling instead of only creation.
+- Worker now stages `GET /api/subscription` and Stripe billing portal routes expected by the client.
+- A source-controlled replacement for the live Supabase `stripe-webhook` Edge Function has been staged.
+- The migration now adds Stripe lifecycle columns plus a usable `revenue_summary.id` sequence and unique `scope` conflict target.
+
+Production remains unchanged.
