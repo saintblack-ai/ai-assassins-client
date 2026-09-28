@@ -84,16 +84,32 @@ function decodeJwtPayload(token) {
   }
 }
 
-function getAuthenticatedUserContext(request) {
+async function getAuthenticatedUserContext(request, env) {
   const authorization = request.headers.get("authorization") || "";
   if (!authorization.startsWith("Bearer ")) {
     return { userId: "", email: "" };
   }
 
-  const payload = decodeJwtPayload(authorization.slice("Bearer ".length));
+  const { url, serviceRoleKey } = getSupabaseConfig(env);
+  if (!url || !serviceRoleKey) {
+    throw new Error("Supabase auth verification is not configured.");
+  }
+
+  const response = await fetch(`${url}/auth/v1/user`, {
+    headers: {
+      apikey: serviceRoleKey,
+      authorization
+    }
+  });
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok || !payload?.id) {
+    return { userId: "", email: "" };
+  }
+
   return {
-    userId: String(payload?.sub || ""),
-    email: String(payload?.email || "")
+    userId: String(payload.id || ""),
+    email: String(payload.email || "")
   };
 }
 
@@ -234,39 +250,77 @@ function extractWebhookMetadata(object = {}) {
   const metadata = object.metadata || {};
 
   return {
-    userId: String(metadata.user_id || metadata.userId || object.client_reference_id || "")
+    userId: String(metadata.user_id || metadata.userId || object.client_reference_id || ""),
+    tier: String(metadata.tier || metadata.plan || "pro").toLowerCase()
   };
 }
 
-function buildSubscriptionRecordFromCheckoutSession(session) {
+function normalizeTier(value) {
+  const tier = String(value || "").toLowerCase();
+  return tier === "elite" ? "elite" : "pro";
+}
+
+function stripeTimestampToIso(value) {
+  const seconds = Number(value || 0);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : undefined;
+}
+
+function buildSubscriptionRecordFromCheckoutSession(session, eventId = "") {
   const metadata = extractWebhookMetadata(session);
   const status =
     session.payment_status === "paid" || session.status === "complete" ? "active" : "incomplete";
 
   return normalizeSubscriptionRecord({
     user_id: metadata.userId,
-    plan: "pro",
+    plan: normalizeTier(metadata.tier),
     status,
+    stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id,
+    stripe_subscription_id:
+      typeof session.subscription === "string" ? session.subscription : session.subscription?.id,
+    billing_state: status,
+    last_stripe_event_id: eventId,
     updated_at: new Date().toISOString()
   });
 }
 
-function buildSubscriptionRecordFromSubscription(subscription) {
+function buildSubscriptionRecordFromSubscription(subscription, eventId = "") {
   const metadata = extractWebhookMetadata(subscription);
+  const price = subscription.items?.data?.[0]?.price || {};
+  const customer =
+    typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id;
 
   return normalizeSubscriptionRecord({
     user_id: metadata.userId,
-    plan: "pro",
+    plan: normalizeTier(metadata.tier),
     status: String(subscription.status || "active"),
+    current_period_end: stripeTimestampToIso(subscription.current_period_end),
+    cancel_at_period_end: Boolean(subscription.cancel_at_period_end),
+    stripe_customer_id: customer,
+    stripe_subscription_id: subscription.id,
+    stripe_price_id: price.id,
+    monthly_amount: typeof price.unit_amount === "number" ? price.unit_amount / 100 : undefined,
+    billing_state: String(subscription.status || "active"),
+    last_stripe_event_id: eventId,
     updated_at: new Date().toISOString()
   });
 }
 
 async function findExistingSubscription(env, record) {
+  if (record.stripe_subscription_id) {
+    const byStripeSubscription = await supabaseRequest(
+      env,
+      `/rest/v1/subscriptions?select=id,user_id,stripe_subscription_id&stripe_subscription_id=eq.${encodeURIComponent(record.stripe_subscription_id)}&limit=1`
+    );
+
+    if (Array.isArray(byStripeSubscription) && byStripeSubscription.length > 0) {
+      return byStripeSubscription[0];
+    }
+  }
+
   if (record.user_id) {
     const byUser = await supabaseRequest(
       env,
-      `/rest/v1/subscriptions?select=id,user_id&user_id=eq.${encodeURIComponent(record.user_id)}&order=updated_at.desc.nullslast&limit=1`
+      `/rest/v1/subscriptions?select=id,user_id,stripe_subscription_id&user_id=eq.${encodeURIComponent(record.user_id)}&order=updated_at.desc.nullslast&limit=1`
     );
 
     if (Array.isArray(byUser) && byUser.length > 0) {
@@ -311,7 +365,7 @@ async function upsertSubscriptionRecord(env, record) {
 
 async function handleStripeWebhookEvent(event, env) {
   if (event.type === "checkout.session.completed") {
-    const record = buildSubscriptionRecordFromCheckoutSession(event.data?.object || {});
+    const record = buildSubscriptionRecordFromCheckoutSession(event.data?.object || {}, event.id);
     if (!record.user_id) {
       throw new Error("Webhook session is missing user_id metadata.");
     }
@@ -319,10 +373,25 @@ async function handleStripeWebhookEvent(event, env) {
     return upsertSubscriptionRecord(env, record);
   }
 
-  if (event.type === "customer.subscription.created") {
-    const record = buildSubscriptionRecordFromSubscription(event.data?.object || {});
+  if (
+    event.type === "customer.subscription.created" ||
+    event.type === "customer.subscription.updated" ||
+    event.type === "customer.subscription.deleted"
+  ) {
+    const record = buildSubscriptionRecordFromSubscription(event.data?.object || {}, event.id);
+    const existing = await findExistingSubscription(env, record);
+
+    if (!record.user_id && existing?.user_id) {
+      record.user_id = existing.user_id;
+    }
+
     if (!record.user_id) {
-      throw new Error("Webhook subscription is missing user_id metadata.");
+      throw new Error("Webhook subscription is missing user_id metadata and no existing mapping was found.");
+    }
+
+    if (event.type === "customer.subscription.deleted") {
+      record.status = "canceled";
+      record.billing_state = "canceled";
     }
 
     return upsertSubscriptionRecord(env, record);
@@ -358,6 +427,10 @@ function getStripePriceForTier(env, tier) {
     return String(env.STRIPE_PRICE_PRO || "");
   }
 
+  if (tier === "elite") {
+    return String(env.STRIPE_PRICE_ELITE || "");
+  }
+
   return "";
 }
 
@@ -365,7 +438,7 @@ async function createStripeCheckoutSession(env, payload, request) {
   const stripeSecretKey = String(env.STRIPE_SECRET_KEY || "");
   const requestedTier = String(payload?.tier || "pro").toLowerCase();
   const stripePrice = getStripePriceForTier(env, requestedTier);
-  const userContext = getAuthenticatedUserContext(request);
+  const userContext = await getAuthenticatedUserContext(request, env);
 
   if (!stripeSecretKey) {
     throw new Error("STRIPE_SECRET_KEY is not configured.");
