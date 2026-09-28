@@ -32,8 +32,20 @@ create index if not exists subscriptions_stripe_customer_id_idx
 create index if not exists subscriptions_user_updated_idx
   on public.subscriptions (user_id, updated_at desc);
 
--- The existing Edge Function upserts revenue_summary using scope.
--- The restored database currently has no unique scope index, so add one.
+-- The restored revenue_summary.id has no default sequence, but the webhook
+-- needs to be able to insert the initial global summary row.
+create sequence if not exists public.revenue_summary_id_seq;
+alter sequence public.revenue_summary_id_seq owned by public.revenue_summary.id;
+alter table public.revenue_summary
+  alter column id set default nextval('public.revenue_summary_id_seq'::regclass);
+
+select setval(
+  'public.revenue_summary_id_seq',
+  greatest(coalesce((select max(id) from public.revenue_summary), 0) + 1, 1),
+  false
+);
+
+-- The Edge Function upserts revenue_summary using scope.
 create unique index if not exists revenue_summary_scope_uidx
   on public.revenue_summary (scope)
   where scope is not null;
