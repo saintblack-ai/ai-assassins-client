@@ -153,9 +153,9 @@ export async function getUserTier(userId) {
 
   const { data, error } = await supabase
     .from("subscriptions")
-    .select("tier,status")
+    .select("plan,status,updated_at")
     .eq("user_id", userId)
-    .order("created_at", { ascending: false })
+    .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
@@ -164,8 +164,8 @@ export async function getUserTier(userId) {
   }
 
   if (data.status === "active" || data.status === "trialing") {
-    if (data.tier === "pro" || data.tier === "elite") {
-      return data.tier;
+    if (data.plan === "pro" || data.plan === "elite") {
+      return data.plan;
     }
   }
 
