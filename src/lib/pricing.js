@@ -9,8 +9,8 @@ export const PRICING_TIERS = [
   {
     id: "pro",
     name: "Pro",
-    price: 49.99,
-    displayPrice: "$49.99/month",
+    price: 49,
+    displayPrice: "$49/month",
     stripeCheckoutUrl: "https://buy.stripe.com/cNi00c09ydYl0EjbHJbII02",
     features: [
       "Full AI dashboard",
@@ -22,8 +22,8 @@ export const PRICING_TIERS = [
   {
     id: "elite",
     name: "Elite",
-    price: 99.99,
-    displayPrice: "$99.99/month",
+    price: 99,
+    displayPrice: "$99/month",
     stripeCheckoutUrl: "https://buy.stripe.com/eVq00c5tS9I55YD135bII05",
     features: [
       "Priority signals",
