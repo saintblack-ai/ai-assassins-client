@@ -3,6 +3,12 @@ BACKEND_BASE_URL=http://127.0.0.1:8787
 CRON_AUTH_TOKEN=
 SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+# Live QX Technology price IDs are documented in docs/2026-09-27_BILLING_SUBSCRIPTION_REPAIR_AUDIT.md.
+# Keep real IDs in deployment environment variables, not source.
+STRIPE_PRICE_PRO=
+STRIPE_PRICE_ELITE=
 DASHBOARD_SIGNALS_PATH=/api/internal/cron/dashboard-signals
 ACTIVITY_FEED_PATH=/api/internal/cron/activity-feed
 METRICS_SNAPSHOTS_PATH=/api/internal/cron/metrics-snapshots
