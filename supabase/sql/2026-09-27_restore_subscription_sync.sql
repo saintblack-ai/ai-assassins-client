@@ -47,8 +47,7 @@ select setval(
 
 -- The Edge Function upserts revenue_summary using scope.
 create unique index if not exists revenue_summary_scope_uidx
-  on public.revenue_summary (scope)
-  where scope is not null;
+  on public.revenue_summary (scope);
 
 commit;
 
