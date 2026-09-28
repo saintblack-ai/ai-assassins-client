@@ -503,6 +503,114 @@ async function createStripeCheckoutSession(env, payload, request) {
   };
 }
 
+async function getLatestUserSubscription(env, userId) {
+  if (!userId) {
+    return null;
+  }
+
+  const rows = await supabaseRequest(
+    env,
+    `/rest/v1/subscriptions?select=id,user_id,plan,status,created_at,current_period_end,cancel_at_period_end,stripe_customer_id,stripe_subscription_id,stripe_price_id,monthly_amount,billing_state,updated_at&user_id=eq.${encodeURIComponent(userId)}&order=updated_at.desc.nullslast&limit=1`
+  );
+
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+
+async function handleSubscriptionRequest(request, env) {
+  const userContext = await getAuthenticatedUserContext(request, env);
+  if (!userContext.userId) {
+    return createJsonResponse({ ok: false, error: "unauthorized" }, 401, createCorsHeaders());
+  }
+
+  const subscription = await getLatestUserSubscription(env, userContext.userId);
+  if (!subscription) {
+    return createJsonResponse(
+      {
+        plan: "free",
+        tier: "free",
+        status: "free",
+        active: false,
+        currentPeriodEnd: null,
+        cancelAtPeriodEnd: false,
+        stripeCustomerId: null,
+        stripeSubscriptionId: null
+      },
+      200,
+      createCorsHeaders()
+    );
+  }
+
+  return createJsonResponse(
+    {
+      ...subscription,
+      tier: subscription.plan || "free",
+      active: subscription.status === "active" || subscription.status === "trialing",
+      currentPeriodEnd: subscription.current_period_end || null,
+      cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+      stripeCustomerId: subscription.stripe_customer_id || null,
+      stripeSubscriptionId: subscription.stripe_subscription_id || null,
+      billingState: subscription.billing_state || subscription.status || null
+    },
+    200,
+    createCorsHeaders()
+  );
+}
+
+async function createStripeBillingPortalSession(env, request, payload = {}) {
+  const stripeSecretKey = String(env.STRIPE_SECRET_KEY || "");
+  if (!stripeSecretKey) {
+    throw new Error("STRIPE_SECRET_KEY is not configured.");
+  }
+
+  const userContext = await getAuthenticatedUserContext(request, env);
+  if (!userContext.userId) {
+    throw new Error("Unauthorized");
+  }
+
+  const subscription = await getLatestUserSubscription(env, userContext.userId);
+  if (!subscription?.stripe_customer_id) {
+    throw new Error("No Stripe customer is linked to this account.");
+  }
+
+  const returnUrl =
+    String(payload?.returnUrl || "") ||
+    request.headers.get("origin") ||
+    new URL(request.url).origin;
+
+  const form = new URLSearchParams();
+  form.set("customer", subscription.stripe_customer_id);
+  form.set("return_url", returnUrl);
+
+  const response = await fetch(`${STRIPE_API_BASE_URL}/billing_portal/sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${stripeSecretKey}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: form.toString()
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.error?.message || `stripe_http_${response.status}`);
+  }
+
+  if (!result?.url) {
+    throw new Error("Stripe did not return a billing portal URL.");
+  }
+
+  return {
+    ok: true,
+    url: result.url
+  };
+}
+
+async function handleStripeBillingPortalRequest(request, env) {
+  const payload = await readJsonBody(request);
+  const portal = await createStripeBillingPortalSession(env, request, payload);
+  return createJsonResponse(portal, 200, createCorsHeaders());
+}
+
 function buildJobDefinitions(env) {
   return [
     {
@@ -921,6 +1029,21 @@ export default {
       return createJsonResponse(buildHealthPayload(env), 200, corsHeaders);
     }
 
+    if (request.method === "GET" && url.pathname === "/api/subscription") {
+      try {
+        return await handleSubscriptionRequest(request, env);
+      } catch (error) {
+        return createJsonResponse(
+          {
+            ok: false,
+            error: String(error?.message || error || "subscription_lookup_failed")
+          },
+          500,
+          corsHeaders
+        );
+      }
+    }
+
     if (request.method === "GET" && url.pathname === "/api/platform/dashboard") {
       return createJsonResponse(
         {
@@ -993,6 +1116,29 @@ export default {
             error: String(error?.message || error || "stripe_checkout_failed")
           },
           500,
+          corsHeaders
+        );
+      }
+    }
+
+    if (
+      request.method === "POST" &&
+      (
+        url.pathname === "/api/stripe/customer_portal" ||
+        url.pathname === "/api/stripe/customer-portal" ||
+        url.pathname === "/api/stripe/portal"
+      )
+    ) {
+      try {
+        return await handleStripeBillingPortalRequest(request, env);
+      } catch (error) {
+        const message = String(error?.message || error || "stripe_portal_failed");
+        return createJsonResponse(
+          {
+            ok: false,
+            error: message
+          },
+          message === "Unauthorized" ? 401 : 500,
           corsHeaders
         );
       }
