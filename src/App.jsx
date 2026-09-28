@@ -341,7 +341,7 @@ function formatDateTime(value) {
 }
 
 function normalizeSubscriptionState(subscription, tier) {
-  const normalizedTier = firstDefined(subscription?.tier, subscription?.planTier, subscription?.plan_tier, tier, "free");
+  const normalizedTier = firstDefined(subscription?.tier, subscription?.plan, subscription?.planTier, subscription?.plan_tier, tier, "free");
   const normalizedStatus = firstDefined(
     subscription?.status,
     subscription?.subscriptionStatus,
