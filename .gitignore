@@ -1,8 +1,8 @@
 node_modules/
-
-node_modules/
 .env
 .env.*
 !.env.example
 !.dev.vars.example
+.wrangler/
+dist/
 worker-startup.cpuprofile
