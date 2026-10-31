@@ -1,4 +1,5 @@
 import { isSupabaseEnabled, supabase } from "./supabase";
+import { readApiJson } from "./apiResponse.js";
 
 function resolveApiBaseUrl() {
   const configured = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
@@ -198,7 +199,7 @@ async function apiFetch(path, accessToken, options = {}) {
       }
     });
 
-    const payload = await response.json().catch(() => null);
+    const payload = await readApiJson(response);
     if (!response.ok) {
       const apiError = new Error(payload?.error || `request_failed_${response.status}`);
       apiError.status = response.status;

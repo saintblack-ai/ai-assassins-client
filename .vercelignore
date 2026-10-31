@@ -1,0 +1,9 @@
+# Never upload owner credentials, tracked local dependencies or old build output.
+.git
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+node_modules
+dist
+worker-startup.cpuprofile
