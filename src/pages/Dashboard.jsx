@@ -18,6 +18,7 @@ import {
   normalizeSubscriptionRecord
 } from "../lib/subscription";
 import { MOCK_PLATFORM_DASHBOARD, setMockMode, shouldUseMockData } from "../lib/mockPlatform";
+import { readDashboardApiObject } from "../lib/dashboardApiRead.js";
 
 const ADMIN_EMAIL = String(import.meta.env.VITE_ADMIN_EMAIL || "").trim().toLowerCase();
 const DASHBOARD_PATH = `${import.meta.env.BASE_URL || "/"}dashboard`.replace(/\/{2,}/g, "/");
@@ -604,10 +605,16 @@ export default function DashboardPage({ adminMode = false }) {
 
     try {
       const healthResult = await fetch(getBackendHealthcheckUrl())
-        .then((response) => response.json())
-        .catch(() => ({ ok: false }));
-      setHealth({ ok: Boolean(healthResult?.ok) });
-      const dashboardPayload = await fetchPlatformDashboard(session?.access_token || null).catch(() => null);
+        .then(readDashboardApiObject)
+        .catch(() => {
+          setError("Backend health could not be verified. Check API routing and backend configuration.");
+          return { ok: false };
+        });
+      setHealth({ ok: healthResult.ok === true });
+      const dashboardPayload = await fetchPlatformDashboard(session?.access_token || null).catch((error) => {
+        setError(String(error?.message || "Dashboard data is temporarily unavailable."));
+        return null;
+      });
       const resolvedDashboard = mockEnabled ? MOCK_PLATFORM_DASHBOARD : dashboardPayload;
       let normalizedSubscription = normalizeSubscriptionRecord(null);
 
@@ -632,13 +639,7 @@ export default function DashboardPage({ adminMode = false }) {
           headers: {
             Authorization: `Bearer ${session.access_token}`
           }
-        }).then(async (response) => {
-          const payload = await response.json().catch(() => null);
-          if (!response.ok) {
-            throw new Error(payload?.error || `admin_request_failed_${response.status}`);
-          }
-          return payload;
-        });
+        }).then(readDashboardApiObject);
         setAdminData(adminPayload);
       } else {
         setAdminData(null);
